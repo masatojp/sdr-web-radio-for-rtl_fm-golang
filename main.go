@@ -43,6 +43,7 @@ const (
 type ServerState struct {
 	Freq        int     `json:"freq"`
 	Mode        string  `json:"mode"`
+	Title       string  `json:"title"` // 追加: 現在のチャンネル名
 	Att         string  `json:"att"`
 	Squelch     int     `json:"squelch"`
 	IsRecording bool    `json:"isRecording"`
@@ -64,6 +65,7 @@ type WSCommand struct {
 	Password    string          `json:"password,omitempty"`
 	Freq        float64         `json:"freq,omitempty"`
 	Mode        string          `json:"mode,omitempty"`
+	Title       string          `json:"title,omitempty"` // 追加: 選局時のタイトル
 	Att         string          `json:"att,omitempty"`
 	Val         int             `json:"val,omitempty"`
 	Filename    string          `json:"filename,omitempty"`
@@ -223,6 +225,7 @@ var (
 	state = ServerState{
 		Freq:        InitialFreq,
 		Mode:        InitialMode,
+		Title:       "", // 初期タイトル
 		Att:         "off",
 		Squelch:     10,
 		IsRecording: false,
@@ -497,11 +500,7 @@ func loadData() {
 			{Title: "Narita International Airport", IsFolder: true, ParentID: "", ID: "1764649131163"},
 			{Title: "HND TWR RWY-D", Freq: 118.725, Mode: "AM", IsFolder: false, ParentID: "1764651543759", ID: "1764429456968"},
 		}
-		// We call write here, but since we hold lock, we should use a non-locking write or careful
-        // saveBookmarks locks, so we should allow it to lock. BUT Go locks are not re-entrant.
-        // For simplicity, we just won't save default back to disk immediately here to avoid deadlock,
-        // or we release lock temporarily.
-        // Better: just assign. Save will happen on next change.
+		saveBookmarksToFile()
 	}
 
 	sData, err := os.ReadFile(SquelchFile)
@@ -560,6 +559,7 @@ func broadcastStatus() {
 		"type":        "status_update",
 		"freq":        state.Freq,
 		"mode":        state.Mode,
+		"title":       state.Title, // タイトルを含める
 		"att":         state.Att,
 		"squelch":     state.Squelch,
 		"isRecording": state.IsRecording,
@@ -652,6 +652,8 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				state.mu.Lock()
 				state.Freq = int(cmd.Freq)
 				state.Mode = cmd.Mode
+				// タイトル更新（空の場合はクリア）
+				state.Title = cmd.Title
 				state.mu.Unlock()
 				k := fmt.Sprintf("%d", int(cmd.Freq))
 				if v, ok := squelchDB[k]; ok {
@@ -840,7 +842,8 @@ const htmlContent = `
     body { background: var(--bg); color: var(--txt); font-family: 'Inter', sans-serif; margin: 0; display: flex; justify-content: center; min-height: 100vh; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
     .app { width: 100%; max-width: 480px; padding: 20px 20px 100px; box-sizing: border-box; }
     .panel { background: var(--panel); backdrop-filter: blur(12px); border-radius: 16px; border: 1px solid rgba(255,255,255,0.08); padding: 20px; margin-bottom: 16px; }
-    .freq { font-family: 'JetBrains Mono', monospace; font-size: 3.2rem; text-align: center; font-weight: 700; line-height: 1; text-shadow: 0 0 20px var(--acc-dim); margin: 15px 0; }
+    .freq { font-family: 'JetBrains Mono', monospace; font-size: 3.2rem; text-align: center; font-weight: 700; line-height: 1; text-shadow: 0 0 20px var(--acc-dim); margin: 10px 0; }
+    .channel-title { font-family: 'Inter', sans-serif; font-size: 1.2rem; text-align: center; color: var(--acc); font-weight: 600; min-height: 1.5em; text-shadow: 0 0 10px rgba(0,255,200,0.3); margin-top: 10px; }
     .badges { display: flex; justify-content: center; gap: 8px; }
     .badge { font-size: 0.75rem; padding: 4px 10px; border-radius: 20px; background: rgba(255,255,255,0.05); color: var(--sub); border: 1px solid rgba(255,255,255,0.05); transition: 0.2s; }
     .badge-sql { background: var(--mute); color: #ccc; }
@@ -907,6 +910,7 @@ const htmlContent = `
                 <span class="badge" id="bdgAtt" style="display:none">ATT</span>
                 <span class="badge badge-sql" id="bdgSql">MUTED</span>
             </div>
+            <div class="channel-title" id="dspTitle"></div>
             <div class="freq" id="dspFreq">---.---</div>
             <div class="meter-wrap">
                 <div class="meter-fill" id="dspRssi"></div>
@@ -1045,10 +1049,11 @@ const htmlContent = `
             const m = window.ui.modalMode; 
             if(!skip) { const v = parseFloat(document.getElementById('inpFreq').value); if(v) f = Math.floor(v*1e6); }
             const p = document.getElementById('inpPass').value;
-            this.send({type:'auth_tune', password:p, freq:f, mode:m});
+            // マニュアルチューニング時はタイトルをクリア
+            this.send({type:'auth_tune', password:p, freq:f, mode:m, title:''});
             window.ui.closeModal();
         },
-        tuneDir(f, m) {
+        tuneDir(f, m, t) {
             const p = document.getElementById('inpPass').value;
             if (!p) {
                 state.freq = Math.floor(f*1e6);
@@ -1058,7 +1063,8 @@ const htmlContent = `
                 window.ui.modal('tune');
                 return;
             }
-            this.send({type:'auth_tune', password:p, freq:Math.floor(f*1e6), mode:m});
+            // タイトル付きで選局
+            this.send({type:'auth_tune', password:p, freq:Math.floor(f*1e6), mode:m, title:t});
             state.mode = m;
         },
         saveBookmark() {
@@ -1204,8 +1210,8 @@ const htmlContent = `
             if (!('mediaSession' in navigator) || !audioCtx || audioCtx.state !== 'running') return;
             navigator.mediaSession.playbackState = 'playing';
             
-            // Fixed backticks issue by using concatenation
-            const titleStr = (state.freq/1e6).toFixed(3) + ' MHz';
+            // メタデータにもタイトル反映
+            const titleStr = state.title ? state.title : (state.freq/1e6).toFixed(3) + ' MHz';
             const artistStr = state.mode + ' | SQL: ' + state.squelch + ' | ' + (state.rec ? '● REC' : 'LIVE');
             
             navigator.mediaSession.metadata = new MediaMetadata({
@@ -1224,8 +1230,10 @@ const htmlContent = `
             const prevRec = state.rec;
 
             state.freq=m.freq; state.mode=m.mode; state.att=m.att; state.rec=m.isRecording; state.squelch=m.squelch;
+            state.title=m.title; // 状態更新
             
             this.els.freq.innerText = (m.freq/1e6).toFixed(3);
+            document.getElementById('dspTitle').innerText = m.title || ''; // タイトル表示更新
             document.getElementById('bdgMode').innerText = m.mode;
             document.getElementById('bdgAtt').style.display = m.att!=='off'?'inline-block':'none';
             document.getElementById('bdgAtt').innerText = 'ATT '+m.att.toUpperCase();
@@ -1386,8 +1394,13 @@ const htmlContent = `
                 if (n.isFolder) {
                     onClick = 'window.ui.tog(\''+n.id+'\')';
                 } else {
-                    if (!isEdit) onClick = 'window.ws.tuneDir('+n.freq+', \''+n.mode+'\')';
-                    else onClick = "event.stopPropagation(); window.ui.modal('edit', '"+n.id+"')"; 
+                    if (!isEdit) {
+                        // タイトルを安全に渡すためのエスケープ処理
+                        const safeTitle = n.title.replace(/'/g, "\\'");
+                        onClick = 'window.ws.tuneDir('+n.freq+', \''+n.mode+'\', \''+safeTitle+'\')';
+                    } else {
+                        onClick = "event.stopPropagation(); window.ui.modal('edit', '"+n.id+"')"; 
+                    }
                 }
 
                 if(n.isFolder) {
