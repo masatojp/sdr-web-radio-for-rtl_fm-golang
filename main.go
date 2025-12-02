@@ -470,8 +470,28 @@ func loadData() {
 	if err == nil {
 		json.Unmarshal(bData, &bookmarks)
 	} else {
+		// Use the provided JSON data as default
 		bookmarks = []Bookmark{
-			{ID: "1", Title: "Default Folder", IsFolder: true},
+			{Title: "Sendai Airport", IsFolder: true, ParentID: "", ID: "1763731824815"},
+			{Title: "SDJ ATIS", Freq: 126.45, Mode: "AM", IsFolder: false, ParentID: "1763731824815", ID: "1763731847585"},
+			{Title: "SDJ TWR", Freq: 118.7, Mode: "AM", IsFolder: false, ParentID: "1763731824815", ID: "1763731881249"},
+			{Title: "SDJ GND", Freq: 121.7, Mode: "AM", IsFolder: false, ParentID: "1763731824815", ID: "1763731893279"},
+			{Title: "SDJ APP", Freq: 120.4, Mode: "AM", IsFolder: false, ParentID: "1763731824815", ID: "1763731912991"},
+			{Title: "Sendai FM Radio", IsFolder: true, ParentID: "", ID: "1763731929504"},
+			{Title: "TBC FM", Freq: 93.5, Mode: "WFM", IsFolder: false, ParentID: "1763731929504", ID: "1763731978016"},
+			{Title: "Date FM", Freq: 77.1, Mode: "WFM", IsFolder: false, ParentID: "1763731929504", ID: "1763732002721"},
+			{Title: "NHK-FM Sendai", Freq: 82.5, Mode: "WFM", IsFolder: false, ParentID: "1763731929504", ID: "1763731963953"},
+			{Title: "Tokyo FM Radio", IsFolder: true, ParentID: "", ID: "1764482175943"},
+			{Title: "HND ATIS", Freq: 128.8, Mode: "AM", IsFolder: false, ParentID: "1764429116145", ID: "1764429481611"},
+			{Title: "HND TWR RWY-A", Freq: 118.1, Mode: "AM", IsFolder: false, ParentID: "1764429116145", ID: "1764429162285"},
+			{Title: "HND TWR RWY-B", Freq: 118.575, Mode: "AM", IsFolder: false, ParentID: "1764429116145", ID: "1764429393136"},
+			{Title: "HND TWR RWY-C/RWY23", Freq: 124.35, Mode: "AM", IsFolder: false, ParentID: "1764429116145", ID: "1764429422892"},
+			{Title: "TWR", IsFolder: true, ParentID: "1764429116145", ID: "1764651543759"},
+			{Title: "Tokyo International Airport", IsFolder: true, ParentID: "", ID: "1764429116145"},
+			{Title: " Tokyo FM", Freq: 80, Mode: "FM", IsFolder: false, ParentID: "1764482175943", ID: "1764482208041"},
+			{Title: "なとらじ", Freq: 80.1, Mode: "WFM", IsFolder: false, ParentID: "1763731929504", ID: "1764553047184"},
+			{Title: "Narita International Airport", IsFolder: true, ParentID: "", ID: "1764649131163"},
+			{Title: "HND TWR RWY-D", Freq: 118.725, Mode: "AM", IsFolder: false, ParentID: "1764651543759", ID: "1764429456968"},
 		}
 		saveBookmarks()
 	}
@@ -1267,15 +1287,15 @@ const htmlContent = `
                 html += '<div class="move-item" onclick="window.ws.changeParent(null)"><span class="material-symbols-outlined" style="margin-right:8px">home</span> ROOT</div>';
             }
             
-            // Fix: correctly handle null/empty parentId logic
             const children = state.bm.filter(b => {
                 if (!b.isFolder) return false;
-                if (parentId === null) return !b.parentId; 
+                // Handle null/empty logic robustly
+                if (parentId === null) return !b.parentId || b.parentId === "null"; 
                 return b.parentId === parentId;
             });
             
             children.forEach(c => {
-                // Prevent moving a folder into itself
+                // Prevent moving a folder into itself, but allow showing other folders
                 if (c.id === state.moveTargetId) return; 
 
                 const pad = depth * 20;
