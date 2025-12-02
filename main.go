@@ -15,11 +15,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/joho/godotenv"
 )
 
 // ==========================================
@@ -40,7 +40,6 @@ const (
 // 2. データ構造 (Data Structures)
 // ==========================================
 
-// ServerState はアプリ全体の共有状態を管理します
 type ServerState struct {
 	Freq        int     `json:"freq"`
 	Mode        string  `json:"mode"`
@@ -57,22 +56,39 @@ type Bookmark struct {
 	Freq     float64 `json:"freq,omitempty"`
 	Mode     string  `json:"mode,omitempty"`
 	IsFolder bool    `json:"isFolder"`
-	ParentID string  `json:"parentId"` // JSONではnull許容だがGoではstringゼロ値などで扱う
+	ParentID string  `json:"parentId"`
 }
 
-// WebSocket Command
 type WSCommand struct {
 	Type        string          `json:"type"`
 	Password    string          `json:"password,omitempty"`
-	Freq        float64         `json:"freq,omitempty"` // 実際のJSONはMHzかHzか確認が必要(JSはHzで送る)
+	Freq        float64         `json:"freq,omitempty"`
 	Mode        string          `json:"mode,omitempty"`
 	Att         string          `json:"att,omitempty"`
-	Val         int             `json:"val,omitempty"` // Squelch value
+	Val         int             `json:"val,omitempty"`
 	Filename    string          `json:"filename,omitempty"`
-	Data        json.RawMessage `json:"data,omitempty"` // For bookmarks
+	Data        json.RawMessage `json:"data,omitempty"`
 	ID          string          `json:"id,omitempty"`
 	Dir         string          `json:"dir,omitempty"`
 	NewParentID string          `json:"newParentId,omitempty"`
+}
+
+// Discord Payload Structure
+type DiscordEmbedField struct {
+	Name   string `json:"name"`
+	Value  string `json:"value"`
+	Inline bool   `json:"inline"`
+}
+type DiscordEmbed struct {
+	Title       string              `json:"title"`
+	Description string              `json:"description"`
+	Color       int                 `json:"color"`
+	Fields      []DiscordEmbedField `json:"fields"`
+	Timestamp   string              `json:"timestamp"`
+}
+type DiscordPayload struct {
+	Username string         `json:"username"`
+	Embeds   []DiscordEmbed `json:"embeds"`
 }
 
 // ==========================================
@@ -107,9 +123,7 @@ type ProcessResult struct {
 	IsOpen bool
 }
 
-// Process handles a chunk of Int16LE audio
 func (d *AudioDSP) Process(input []byte, threshold int) ProcessResult {
-	// input length bytes (2 bytes per sample)
 	numSamples := len(input) / 2
 	outBuf := new(bytes.Buffer)
 	
@@ -119,13 +133,12 @@ func (d *AudioDSP) Process(input []byte, threshold int) ProcessResult {
 	reader := bytes.NewReader(input)
 
 	for i := 0; i < numSamples; i++ {
-		// Read Int16
 		var rawInt int16
 		binary.Read(reader, binary.LittleEndian, &rawInt)
 		
 		s := float64(rawInt) / 32768.0
 
-		// DC Offset Removal (High Pass)
+		// DC Offset Removal
 		raw := s
 		s = raw - 0.95*d.lastIn + 0.95*d.lastOut
 		d.lastIn = raw
@@ -140,7 +153,7 @@ func (d *AudioDSP) Process(input []byte, threshold int) ProcessResult {
 
 		p := s * d.agcGain * d.squelchGate
 
-		// Soft Limiter (Cubic)
+		// Soft Limiter
 		if p > 0.95 || p < -0.95 {
 			if p > 3 {
 				p = 1
@@ -150,18 +163,15 @@ func (d *AudioDSP) Process(input []byte, threshold int) ProcessResult {
 				p = p - (p*p*p)/27
 			}
 		}
-		// Hard Clamp
 		if p > 0.99 { p = 0.99 }
 		if p < -0.99 { p = -0.99 }
 
-		// Output Int16
 		outInt := int16(p * 32767)
 		binary.Write(outBuf, binary.LittleEndian, outInt)
 
 		sumSq += s * s
 	}
 
-	// RMS & Squelch Hysteresis
 	rms := math.Sqrt(sumSq / float64(numSamples))
 	d.rms = 0.9*d.rms + 0.1*rms
 
@@ -196,18 +206,15 @@ var (
 		IsRecording: false,
 	}
 	bookmarks []Bookmark
-	squelchDB = make(map[string]int) // freq(string) -> val
+	squelchDB = make(map[string]int)
 	
-	// WebSocket Hub
 	clients   = make(map[*websocket.Conn]bool)
-	broadcast = make(chan []byte) // Binary Audio
-	statusMsg = make(chan []byte) // JSON Updates
+	broadcast = make(chan []byte)
+	statusMsg = make(chan []byte)
 	clientsMu sync.Mutex
 
-	// SDR Control
-	cmdChan = make(chan bool) // Trigger restart
+	cmdChan = make(chan bool)
 	
-	// Recording
 	recFile *os.File
 	recMu   sync.Mutex
 	
@@ -217,25 +224,59 @@ var (
 )
 
 // ==========================================
-// 5. SDR Manager
+// 5. Discord Notification
+// ==========================================
+
+func sendDiscordNotification() {
+	webhookURL := os.Getenv("DISCORD_WEBHOOK_URL")
+	if webhookURL == "" {
+		return
+	}
+
+	freqStr := fmt.Sprintf("%.3f MHz", float64(state.Freq)/1e6)
+	
+	payload := DiscordPayload{
+		Username: "SDR Commander",
+		Embeds: []DiscordEmbed{
+			{
+				Title:       "📡 System Started",
+				Description: "SDR Web Receiver is online (Go Backend).",
+				Color:       5814783, // Greenish
+				Timestamp:   time.Now().Format(time.RFC3339),
+				Fields: []DiscordEmbedField{
+					{Name: "Initial Freq", Value: freqStr, Inline: true},
+					{Name: "Mode", Value: state.Mode, Inline: true},
+				},
+			},
+		},
+	}
+
+	jsonData, _ := json.Marshal(payload)
+	resp, err := http.Post(webhookURL, "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Println("Discord Notification Failed:", err)
+		return
+	}
+	defer resp.Body.Close()
+}
+
+// ==========================================
+// 6. SDR Manager
 // ==========================================
 
 func sdrManager() {
 	var cmd *exec.Cmd
 	var stdout io.ReadCloser
 	dsp := NewAudioDSP()
-	
-	// Data buffer
-	chunkSize := 4096 // bytes
+	chunkSize := 4096
 	buf := make([]byte, chunkSize)
 
 	for {
-		// Prepare Command
 		state.mu.Lock()
 		freqStr := fmt.Sprintf("%d", state.Freq)
 		mode := state.Mode
 		att := state.Att
-		ppm := "0" // Config value
+		ppm := "0"
 		state.mu.Unlock()
 
 		dsp.Reset()
@@ -273,7 +314,6 @@ func sdrManager() {
 			continue
 		}
 
-		// Read Loop
 		done := make(chan error, 1)
 		go func() {
 			reader := bufio.NewReader(stdout)
@@ -284,31 +324,25 @@ func sdrManager() {
 					return
 				}
 				if n > 0 {
-					// DSP Process
 					state.mu.Lock()
 					sq := state.Squelch
 					state.mu.Unlock()
 					
 					res := dsp.Process(buf[:n], sq)
 
-					// Prepare Packet: [RSSI(2), SQL(2), Audio...]
 					header := new(bytes.Buffer)
 					binary.Write(header, binary.LittleEndian, res.RSSI)
-					
 					isOpenInt := int16(0)
 					if res.IsOpen { isOpenInt = 1 }
 					binary.Write(header, binary.LittleEndian, isOpenInt)
 					
 					packet := append(header.Bytes(), res.Buffer...)
 					
-					// Non-blocking broadcast
 					select {
 					case broadcast <- packet:
 					default:
-						// Drop frame if channel full
 					}
 
-					// Recording
 					recMu.Lock()
 					if state.IsRecording && recFile != nil && res.IsOpen {
 						recFile.Write(res.Buffer)
@@ -318,24 +352,21 @@ func sdrManager() {
 			}
 		}()
 
-		// Wait for restart signal or process death
 		select {
 		case <-cmdChan:
 			if cmd.Process != nil {
 				cmd.Process.Kill()
 			}
 		case <-done:
-			// Process died unexpectedly
 		}
 		
 		cmd.Wait()
-		// Small delay before restart
 		time.Sleep(200 * time.Millisecond)
 	}
 }
 
 // ==========================================
-// 6. Recording Logic
+// 7. Recording Logic
 // ==========================================
 
 func startRecording() {
@@ -353,7 +384,6 @@ func startRecording() {
 		return
 	}
 	
-	// Write Placeholder Header
 	writeWavHeader(f, SampleRate, 0)
 	
 	recMu.Lock()
@@ -375,7 +405,6 @@ func stopRecording() {
 	defer recMu.Unlock()
 	
 	if recFile != nil {
-		// Finalize Header
 		stat, _ := recFile.Stat()
 		size := stat.Size()
 		dataLen := uint32(size - 44)
@@ -390,25 +419,24 @@ func stopRecording() {
 }
 
 func writeWavHeader(w io.Writer, rate uint32, dataLen uint32) {
-	// Simple WAV header writer
 	buf := new(bytes.Buffer)
 	buf.WriteString("RIFF")
 	binary.Write(buf, binary.LittleEndian, uint32(36+dataLen))
 	buf.WriteString("WAVEfmt ")
-	binary.Write(buf, binary.LittleEndian, uint32(16)) // Subchunk1Size
-	binary.Write(buf, binary.LittleEndian, uint16(1))  // AudioFormat (PCM)
-	binary.Write(buf, binary.LittleEndian, uint16(1))  // NumChannels (Mono)
-	binary.Write(buf, binary.LittleEndian, rate)       // SampleRate
-	binary.Write(buf, binary.LittleEndian, rate*2)     // ByteRate (16bit mono)
-	binary.Write(buf, binary.LittleEndian, uint16(2))  // BlockAlign
-	binary.Write(buf, binary.LittleEndian, uint16(16)) // BitsPerSample
+	binary.Write(buf, binary.LittleEndian, uint32(16))
+	binary.Write(buf, binary.LittleEndian, uint16(1))
+	binary.Write(buf, binary.LittleEndian, uint16(1))
+	binary.Write(buf, binary.LittleEndian, rate)
+	binary.Write(buf, binary.LittleEndian, rate*2)
+	binary.Write(buf, binary.LittleEndian, uint16(2))
+	binary.Write(buf, binary.LittleEndian, uint16(16))
 	buf.WriteString("data")
 	binary.Write(buf, binary.LittleEndian, dataLen)
 	w.Write(buf.Bytes())
 }
 
 // ==========================================
-// 7. Data Persistence
+// 8. Data Persistence
 // ==========================================
 
 func loadData() {
@@ -420,10 +448,8 @@ func loadData() {
 	if err == nil {
 		json.Unmarshal(bData, &bookmarks)
 	} else {
-		// Defaults
 		bookmarks = []Bookmark{
-			{ID: "1", Title: "Sendai Airport", IsFolder: true},
-			{ID: "2", Title: "TWR", Freq: 118.7, Mode: "AM", ParentID: "1"},
+			{ID: "1", Title: "Default Folder", IsFolder: true},
 		}
 		saveBookmarks()
 	}
@@ -445,7 +471,7 @@ func saveSquelch() {
 }
 
 // ==========================================
-// 8. WebSocket & HTTP Handler
+// 9. WebSocket Handlers
 // ==========================================
 
 func broadcastStatus() {
@@ -475,7 +501,6 @@ func broadcastRecordings() {
 			})
 		}
 	}
-	// Sort by name desc (simple approximation of date desc)
 	sort.Slice(list, func(i, j int) bool {
 		return list[i]["name"].(string) > list[j]["name"].(string)
 	})
@@ -519,14 +544,11 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	clients[ws] = true
 	clientsMu.Unlock()
 
-	// Send initial state
 	broadcastStatus()
 	
-	// Send bookmarks
 	bmMsg, _ := json.Marshal(map[string]interface{}{"type": "bookmarks", "data": bookmarks})
 	ws.WriteMessage(websocket.TextMessage, bmMsg)
 	
-	// Send recordings
 	broadcastRecordings()
 
 	for {
@@ -545,17 +567,15 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		case "auth_tune":
 			if cmd.Password == Password {
 				state.mu.Lock()
-				state.Freq = int(cmd.Freq) // Assuming JS sends Hz
+				state.Freq = int(cmd.Freq)
 				state.Mode = cmd.Mode
 				state.mu.Unlock()
-				// Restore Squelch
 				k := fmt.Sprintf("%d", int(cmd.Freq))
 				if v, ok := squelchDB[k]; ok {
 					state.mu.Lock()
 					state.Squelch = v
 					state.mu.Unlock()
 				}
-				// Signal Restart
 				go func() { cmdChan <- true }()
 				broadcastStatus()
 			}
@@ -580,7 +600,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			os.Remove(filepath.Join(RecordingsPath, cmd.Filename))
 			broadcastRecordings()
 		
-		// Bookmark Management
 		case "add_bookmark":
 			var b Bookmark
 			json.Unmarshal(cmd.Data, &b)
@@ -607,7 +626,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			json.Unmarshal(cmd.Data, &data)
 			for i, b := range bookmarks {
 				if b.ID == data.ID {
-					// Update fields
 					bookmarks[i].Title = data.Title
 					if !data.IsFolder {
 						bookmarks[i].Freq = data.Freq
@@ -621,16 +639,13 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			statusMsg <- bmMsg
 
 		case "move_bookmark":
-			// Simplified swap logic
 			idx := -1
 			for i, b := range bookmarks { if b.ID == cmd.ID { idx = i; break } }
 			if idx != -1 {
 				target := bookmarks[idx]
-				// Filter siblings
-				siblings := []int{} // indices
+				siblings := []int{}
 				for i, b := range bookmarks { if b.ParentID == target.ParentID { siblings = append(siblings, i) } }
 				
-				// Find position in siblings
 				sIdx := -1
 				for i, globalIdx := range siblings { if globalIdx == idx { sIdx = i; break } }
 				
@@ -661,14 +676,20 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // ==========================================
-// 9. Main & HTML Embed
+// 10. Main & HTML Content (Fixed)
 // ==========================================
 
 func main() {
 	flag.Parse()
+	
+	// Load .env file
+	err := godotenv.Load()
+	if err != nil {
+		log.Println("Note: .env file not found, continuing without env vars")
+	}
+
 	loadData()
 
-	// Static & Download Handler
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
 			w.Header().Set("Content-Type", "text/html")
@@ -687,17 +708,22 @@ func main() {
 		http.NotFound(w, r)
 	})
 
-	http.HandleFunc("/ws", wsHandler) // Client connects to /ws or root usually, handled by upgrade
+	http.HandleFunc("/ws", wsHandler)
 
-	// Start Background Routines
 	go sdrManager()
 	go handleMessages()
+
+	// Send notification after startup
+	go func() {
+		time.Sleep(2 * time.Second)
+		sendDiscordNotification()
+	}()
 
 	fmt.Printf("SDR Server (Go) running on http://localhost%s\n", Port)
 	log.Fatal(http.ListenAndServe(Port, nil))
 }
 
-// Frontend Code (Embedded)
+// HTML content with fixed string literals (replaced backticks with single quotes where possible)
 const htmlContent = `
 <!DOCTYPE html>
 <html lang="ja">
@@ -712,24 +738,20 @@ const htmlContent = `
     body { background: var(--bg); color: var(--txt); font-family: 'Inter', sans-serif; margin: 0; display: flex; justify-content: center; min-height: 100vh; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
     .app { width: 100%; max-width: 480px; padding: 20px 20px 100px; box-sizing: border-box; }
     .panel { background: var(--panel); backdrop-filter: blur(12px); border-radius: 16px; border: 1px solid rgba(255,255,255,0.08); padding: 20px; margin-bottom: 16px; }
-    
     .freq { font-family: 'JetBrains Mono', monospace; font-size: 3.2rem; text-align: center; font-weight: 700; line-height: 1; text-shadow: 0 0 20px var(--acc-dim); margin: 15px 0; }
     .badges { display: flex; justify-content: center; gap: 8px; }
     .badge { font-size: 0.75rem; padding: 4px 10px; border-radius: 20px; background: rgba(255,255,255,0.05); color: var(--sub); border: 1px solid rgba(255,255,255,0.05); transition: 0.2s; }
     .badge-sql { background: var(--mute); color: #ccc; }
     .badge-sql.open { background: var(--open); color: #000; box-shadow: 0 0 10px var(--open); font-weight: bold; }
-    
     .meter-wrap { position: relative; height: 32px; margin-top: 20px; border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; overflow: hidden; background: #111; }
     .meter-fill { height: 100%; width: 0%; background: var(--mute); transition: width 0.05s ease-out, background 0.1s; }
     .meter-fill.active { background: var(--open); box-shadow: 0 0 15px var(--open); }
     .sq-mark { position: absolute; top: 0; bottom: 0; width: 2px; background: #ffd700; z-index: 5; transition: left 0.1s; box-shadow: 0 0 8px #ffd700; }
-
     .sq-ctrl-row { display: flex; justify-content: space-between; align-items: center; margin-top: 15px; }
     .sq-val-display { font-family: 'JetBrains Mono', monospace; font-size: 1rem; color: #ffd700; font-weight: bold; margin-left: 5px; }
     .sq-btn-group { display: flex; gap: 4px; }
     .btn-sq { background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.1); color: var(--txt); padding: 8px 0; width: 36px; border-radius: 6px; font-size: 0.75rem; cursor: pointer; text-align: center; }
     .btn-sq:active { background: var(--acc); color: #000; border-color: var(--acc); }
-
     .ctrls { display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px; }
     .btn-row { display: flex; gap: 8px; width: 100%; }
     .btn { flex: 1; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: var(--txt); padding: 12px 8px; border-radius: 12px; font-weight: 600; cursor: pointer; display: flex; justify-content: center; align-items: center; gap: 6px; font-size: 0.75rem; transition: background 0.1s; white-space: nowrap; }
@@ -738,27 +760,19 @@ const htmlContent = `
     .btn-tune { background: linear-gradient(135deg, rgba(255,255,255,0.1), rgba(255,255,255,0.05)); font-size: 1rem; }
     .rec.on { background: #ff3b30; color: #fff; border-color: #ff3b30; animation: p 2s infinite; }
     @keyframes p { 0% {opacity:1} 50% {opacity:0.7} 100% {opacity:1} }
-
     .btn-audio-toggle { width: 100%; padding: 16px; background: rgba(0,255,200,0.15); border: 1px solid var(--acc); color: var(--acc); border-radius: 14px; font-weight: 800; font-size: 1rem; cursor: pointer; display: flex; justify-content: center; align-items: center; gap: 10px; transition: 0.2s; box-shadow: 0 0 15px rgba(0,255,200,0.1); margin-bottom: 5px; }
     .btn-audio-toggle.stop { background: rgba(255, 59, 48, 0.15); border-color: var(--stop); color: var(--stop); box-shadow: 0 0 15px rgba(255, 59, 48, 0.1); }
     .btn-audio-toggle:active { transform: scale(0.98); }
-
     .section-header { display: flex; justify-content: space-between; align-items: center; margin: 24px 4px 8px 4px; }
     .section-title { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; color: var(--sub); }
-    
     .btn-edit-toggle { background: transparent; border: 1px solid var(--sub); color: var(--sub); padding: 4px 12px; border-radius: 6px; font-size: 0.75rem; cursor: pointer; transition: 0.2s; }
     .btn-edit-toggle.editing { background: var(--warn); color: #000; border-color: var(--warn); font-weight: bold; }
-    
     .edit-controls { display: none; gap: 8px; }
     .edit-controls.show { display: flex; }
     .btn-add { background: var(--acc-dim); border: 1px solid var(--acc); color: var(--acc); padding: 4px 10px; border-radius: 6px; font-size: 0.75rem; font-weight: bold; cursor: pointer; }
-
     .tree { display: flex; flex-direction: column; gap: 2px; }
-    
-    /* Edit Mode Styles */
     .panel.edit-mode { border-color: var(--warn); background: rgba(255, 204, 0, 0.05); }
     .panel.edit-mode .row { cursor: default; }
-
     .row { display: flex; align-items: center; padding: 12px; background: rgba(255,255,255,0.02); border-radius: 8px; cursor: pointer; justify-content: space-between; transition: background 0.1s; }
     .row:hover { background: rgba(255,255,255,0.05); }
     .row-click-area { display: flex; align-items: center; flex: 1; height: 100%; } 
@@ -768,22 +782,16 @@ const htmlContent = `
     .icon.rot { transform: rotate(90deg); }
     .txt { display: flex; flex-direction: column; }
     .sub { font-size: 0.8rem; color: var(--sub); }
-    
     .act { display: flex; gap: 4px; }
     .ib { background: transparent; border: none; color: var(--sub); padding: 8px; cursor: pointer; border-radius: 50%; z-index: 10; display:flex; align-items:center; justify-content:center; }
     .ib:hover { color: var(--txt); background: rgba(255,255,255,0.1); }
     .ib-move { color: var(--warn); }
     .ib-del { color: var(--stop); }
-
-    /* Modal Centering */
     .ovl { position: fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); backdrop-filter:blur(8px); display:none; justify-content:center; align-items:center; z-index: 1000; }
     .card { background: #1a1b20; width:90%; max-width:400px; padding:30px; border-radius:24px; box-shadow: 0 10px 40px #000; animation: pop 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
     @keyframes pop { from{transform:scale(0.9); opacity:0} to{transform:scale(1); opacity:1} }
-    
     .inp { width:100%; background:#27282e; border:none; padding:16px; border-radius:12px; color:#fff; font-size:1.2rem; margin-bottom:15px; box-sizing:border-box; outline:none; }
     .inp:focus { outline: 2px solid var(--acc); }
-    
-    /* Move Folder List */
     .move-item { padding: 12px; background: rgba(255,255,255,0.05); border-radius: 8px; cursor: pointer; display: flex; align-items: center; transition: 0.2s; }
     .move-item:hover { background: rgba(255,255,255,0.1); }
     .move-item.selected { background: var(--acc-dim); border: 1px solid var(--acc); color: var(--acc); }
@@ -798,12 +806,10 @@ const htmlContent = `
                 <span class="badge badge-sql" id="bdgSql">MUTED</span>
             </div>
             <div class="freq" id="dspFreq">---.---</div>
-            
             <div class="meter-wrap">
                 <div class="meter-fill" id="dspRssi"></div>
                 <div class="sq-mark" id="sqMarker" style="left:10%"></div>
             </div>
-            
             <div class="sq-ctrl-row">
                 <div style="font-size:0.8rem; color:var(--sub);">AUDIO LEVEL > <span id="valSq" class="sq-val-display">10</span></div>
                 <div class="sq-btn-group">
@@ -821,7 +827,6 @@ const htmlContent = `
             <button class="btn-audio-toggle" id="btnAudio" onclick="window.ui.togAudio()">
                 <span class="material-symbols-outlined">volume_up</span> START LISTENING
             </button>
-
             <div class="btn-row">
                 <button class="btn btn-tune" style="flex:2" onclick="window.ui.modal('tune')"><span class="material-symbols-outlined">dialpad</span> TUNE</button>
                 <button class="btn" id="btnRec" style="flex:1" onclick="window.ws.togRec()"><span class="material-symbols-outlined">fiber_manual_record</span> REC</button>
@@ -846,11 +851,11 @@ const htmlContent = `
         </div>
         
         <div class="panel" id="listBM" style="padding:10px;"></div>
-
         <div class="section-header"><span class="section-title">RECORDINGS</span></div>
         <div class="panel" id="listRec" style="padding:10px;"></div>
     </div>
 
+    <!-- Modals -->
     <div class="ovl" id="modalTune">
         <div class="card">
             <div style="color:#fff; font-weight:700; font-size:1.2rem; margin-bottom:20px;">Set Frequency</div>
@@ -904,7 +909,7 @@ const htmlContent = `
     const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false, moveTargetId: null };
     let nextStartTime = 0; 
 
-    // --- 1. WebSocket Definition ---
+    // WebSocket Definition
     window.ws = {
         c: null,
         connect() {
@@ -985,7 +990,6 @@ const htmlContent = `
         
         audio(b) {
             if(!audioCtx || audioCtx.state !== 'running') return;
-
             const dv = new DataView(b);
             const rssi = dv.getInt16(0, true);
             const sqlOpen = dv.getInt16(2, true);
@@ -1017,7 +1021,7 @@ const htmlContent = `
         }
     };
 
-    // --- 2. UI Definition (Enhanced Media Session) ---
+    // UI Definition
     window.ui = {
         els: { freq:document.getElementById('dspFreq'), rssi:document.getElementById('dspRssi'), sq:document.getElementById('sqMarker'), valSq:document.getElementById('valSq') },
         modalMode: 'AM',
@@ -1026,69 +1030,45 @@ const htmlContent = `
         addType: 'freq',
 
         init() {
-            if (window.ws) {
-                window.ws.connect();
-            } else {
-                console.error("WebSocket controller not initialized!");
-            }
+            if (window.ws) { window.ws.connect(); } 
             
-            // --- Media Session Action Handlers ---
             if ('mediaSession' in navigator) {
                 const ms = navigator.mediaSession;
-                
-                // 再生・停止
                 ms.setActionHandler('play', () => this.togAudio());
                 ms.setActionHandler('pause', () => this.togAudio());
                 ms.setActionHandler('stop', () => this.togAudio());
-
-                // ロック画面の「前の曲」「次の曲」ボタンで周波数微調整 (+/- 100kHz)
                 ms.setActionHandler('previoustrack', () => {
-                    const newFreq = state.freq - 100000; // -0.1 MHz
+                    const newFreq = state.freq - 100000;
                     window.ws.tuneDir(newFreq / 1e6, state.mode);
                 });
                 ms.setActionHandler('nexttrack', () => {
-                    const newFreq = state.freq + 100000; // +0.1 MHz
+                    const newFreq = state.freq + 100000;
                     window.ws.tuneDir(newFreq / 1e6, state.mode);
                 });
-
-                // シークバー操作（オプション：現在は無効化）
-                ms.setActionHandler('seekto', (details) => {});
             }
         },
 
         togAudio() {
             const btn = document.getElementById('btnAudio');
-            
-            // 初回起動または再開
             if (!audioCtx) {
                 const Ctx = window.AudioContext || window.webkitAudioContext;
                 audioCtx = new Ctx({ latencyHint: 'interactive' }); 
                 
-                // --- Background Audio Keeper (Silent Oscillator) ---
                 const dest = audioCtx.createMediaStreamDestination();
                 const audioEl = document.getElementById('audioBridge');
                 audioEl.srcObject = dest.stream;
                 
-                // ユーザーインタラクション必須の再生トリガー
-                audioEl.play().then(() => {
-                    console.log("[Audio] Bridge started for background persistence");
-                }).catch(e => console.warn("[Audio] Autoplay blocked", e));
+                audioEl.play().catch(e => console.warn(e));
+                window.audioDest = dest;
                 
-                window.audioDest = dest; // WebSocket音声の出力先
-                
-                // 無音のオシレーターを流し続ける（パイプラインを生かし続けるため）
                 const osc = audioCtx.createOscillator();
                 const g = audioCtx.createGain();
-                osc.connect(g); 
-                g.connect(dest); // ストリームへ
-                g.connect(audioCtx.destination); // 物理スピーカーへ（iOS対策）
-                
-                osc.frequency.value = 20; // 可聴域下限付近
-                g.gain.value = 0.001;     // ほぼ無音
+                osc.connect(g); g.connect(dest); g.connect(audioCtx.destination);
+                osc.frequency.value = 20; g.gain.value = 0.001;
                 osc.start();
                 
                 this.updateBtnState('running');
-                this.updateMediaMetadata(); // メタデータ即時更新
+                this.updateMediaMetadata();
                 return;
             }
 
@@ -1118,14 +1098,13 @@ const htmlContent = `
             }
         },
         
-        // --- Dynamic Metadata Update ---
         updateMediaMetadata() {
             if (!('mediaSession' in navigator) || !audioCtx || audioCtx.state !== 'running') return;
-            
             navigator.mediaSession.playbackState = 'playing';
             
-            const titleStr = \`\${(state.freq/1e6).toFixed(3)} MHz\`;
-            const artistStr = \`\${state.mode} | SQL: \${state.squelch} | \${state.rec ? '● REC' : 'LIVE'}\`;
+            // Fixed backticks issue by using concatenation
+            const titleStr = (state.freq/1e6).toFixed(3) + ' MHz';
+            const artistStr = state.mode + ' | SQL: ' + state.squelch + ' | ' + (state.rec ? '● REC' : 'LIVE');
             
             navigator.mediaSession.metadata = new MediaMetadata({
                 title: titleStr,
@@ -1136,18 +1115,9 @@ const htmlContent = `
                     { src: 'https://placehold.co/192x192/111/00ffc8?text='+state.mode, sizes: '192x192', type: 'image/png' }
                 ]
             });
-            
-            try {
-                navigator.mediaSession.setPositionState({
-                    duration: Infinity,
-                    playbackRate: 1.0,
-                    position: 0
-                });
-            } catch(e) {}
         },
 
         upd(m) {
-            // ステータス更新を受け取ったら状態を更新
             const prevFreq = state.freq;
             const prevRec = state.rec;
 
@@ -1157,11 +1127,14 @@ const htmlContent = `
             document.getElementById('bdgMode').innerText = m.mode;
             document.getElementById('bdgAtt').style.display = m.att!=='off'?'inline-block':'none';
             document.getElementById('bdgAtt').innerText = 'ATT '+m.att.toUpperCase();
-            ['off','weak','mid','strong'].forEach(k => { document.getElementById('att'+k.charAt(0).toUpperCase()+k.slice(1)).className = 'btn '+(m.att===k?'active':''); });
+            
+            ['off','weak','mid','strong'].forEach(k => { 
+                const el = document.getElementById('att'+k.charAt(0).toUpperCase()+k.slice(1));
+                if(el) el.className = 'btn '+(m.att===k?'active':''); 
+            });
             document.getElementById('btnRec').className = 'btn '+(m.isRecording?'rec on':'');
             this.renderSq(m.squelch);
             
-            // 周波数や録音状態が変わったら通知バーの表示も更新
             if (prevFreq !== m.freq || prevRec !== m.isRecording) {
                 this.updateMediaMetadata();
             }
@@ -1237,14 +1210,14 @@ const htmlContent = `
         genFolderListHtml(parentId, depth) {
             let html = '';
             if (parentId === null) {
-                html += \`<div class="move-item" onclick="window.ws.changeParent(null)"><span class="material-symbols-outlined" style="margin-right:8px">home</span> ROOT</div>\`;
+                html += '<div class="move-item" onclick="window.ws.changeParent(null)"><span class="material-symbols-outlined" style="margin-right:8px">home</span> ROOT</div>';
             }
             
             const children = state.bm.filter(b => b.parentId === parentId && b.isFolder);
             children.forEach(c => {
                 if (c.id === state.moveTargetId) return; 
                 const pad = depth * 20;
-                html += \`<div class="move-item" style="padding-left:\${12+pad}px" onclick="window.ws.changeParent('\${c.id}')"><span class="material-symbols-outlined" style="margin-right:8px">folder</span> \${c.title}</div>\`;
+                html += '<div class="move-item" style="padding-left:'+(12+pad)+'px" onclick="window.ws.changeParent(\''+c.id+'\')"><span class="material-symbols-outlined" style="margin-right:8px">folder</span> '+c.title+'</div>';
                 html += this.genFolderListHtml(c.id, depth + 1);
             });
             return html;
@@ -1282,60 +1255,53 @@ const htmlContent = `
                 
                 let acts = '';
                 if (isEdit) {
-                    const moveBtns = \`
-                        \${!isFirst ? \`<button class="ib ib-move" onclick="event.stopPropagation(); window.ws.move('\${n.id}', 'up')"><span class="material-symbols-outlined">arrow_upward</span></button>\` : ''}
-                        \${!isLast ? \`<button class="ib ib-move" onclick="event.stopPropagation(); window.ws.move('\${n.id}', 'down')"><span class="material-symbols-outlined">arrow_downward</span></button>\` : ''}
-                    \`;
+                    const moveBtns = 
+                        (!isFirst ? '<button class="ib ib-move" onclick="event.stopPropagation(); window.ws.move(\''+n.id+'\', \'up\')"><span class="material-symbols-outlined">arrow_upward</span></button>' : '') +
+                        (!isLast ? '<button class="ib ib-move" onclick="event.stopPropagation(); window.ws.move(\''+n.id+'\', \'down\')"><span class="material-symbols-outlined">arrow_downward</span></button>' : '');
                     
                     let addSubBtns = '';
                     if (n.isFolder) {
-                        addSubBtns += \`<button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_freq', '\${n.id}')" title="Add Channel"><span class="material-symbols-outlined">add</span></button>\`;
-                        addSubBtns += \`<button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_folder', '\${n.id}')" title="Add Sub-Folder"><span class="material-symbols-outlined">create_new_folder</span></button>\`;
+                        addSubBtns += '<button class="ib" onclick="event.stopPropagation(); window.ui.modal(\'add_freq\', \''+n.id+'\')" title="Add Channel"><span class="material-symbols-outlined">add</span></button>';
+                        addSubBtns += '<button class="ib" onclick="event.stopPropagation(); window.ui.modal(\'add_folder\', \''+n.id+'\')" title="Add Sub-Folder"><span class="material-symbols-outlined">create_new_folder</span></button>';
                     }
                     
-                    const moveParentBtn = \`<button class="ib" onclick="event.stopPropagation(); window.ui.modal('move', '\${n.id}')" title="Move to Folder"><span class="material-symbols-outlined">drive_file_move</span></button>\`;
+                    const moveParentBtn = '<button class="ib" onclick="event.stopPropagation(); window.ui.modal(\'move\', \''+n.id+'\')" title="Move to Folder"><span class="material-symbols-outlined">drive_file_move</span></button>';
 
-                    acts = \`
-                        \${moveBtns}
-                        \${moveParentBtn}
-                        \${addSubBtns}
-                        <button class="ib" onclick="event.stopPropagation(); window.ui.modal('edit', '\${n.id}')"><span class="material-symbols-outlined">edit</span></button>
-                        <button class="ib ib-del" onclick="event.stopPropagation(); window.ws.del('\${n.id}')"><span class="material-symbols-outlined">delete</span></button>
-                    \`;
+                    acts = moveBtns + moveParentBtn + addSubBtns + 
+                        '<button class="ib" onclick="event.stopPropagation(); window.ui.modal(\'edit\', \''+n.id+'\')"><span class="material-symbols-outlined">edit</span></button>' + 
+                        '<button class="ib ib-del" onclick="event.stopPropagation(); window.ws.del(\''+n.id+'\')"><span class="material-symbols-outlined">delete</span></button>';
                 }
 
                 let onClick = '';
                 if (n.isFolder) {
-                    onClick = \`window.ui.tog('\${n.id}')\`;
+                    onClick = 'window.ui.tog(\''+n.id+'\')';
                 } else {
-                    if (!isEdit) onClick = \`window.ws.tuneDir(\${n.freq}, '\${n.mode}')\`;
+                    if (!isEdit) onClick = 'window.ws.tuneDir('+n.freq+', \''+n.mode+'\')';
                     else onClick = "event.stopPropagation(); window.ui.modal('edit', '"+n.id+"')"; 
                 }
 
                 if(n.isFolder) {
                     const open = state.expanded.has(n.id);
-                    return \`
-                        <div>
-                            <div class="row" onclick="\${onClick}">
-                                <div class="row-click-area">
-                                    <span class="material-symbols-outlined icon \${open?'rot':''}">chevron_right</span>
-                                    <span style="font-weight:600; margin-left:10px;">\${n.title}</span>
-                                </div>
-                                <div class="act">\${acts}</div>
-                            </div>
-                            <div class="folder-c \${open?'open':''}">\${this.tree(n.c)}</div>
-                        </div>\`;
+                    return '<div>' +
+                            '<div class="row" onclick="'+onClick+'">' +
+                                '<div class="row-click-area">' +
+                                    '<span class="material-symbols-outlined icon '+(open?'rot':'')+'">chevron_right</span>' +
+                                    '<span style="font-weight:600; margin-left:10px;">'+n.title+'</span>' +
+                                '</div>' +
+                                '<div class="act">'+acts+'</div>' +
+                            '</div>' +
+                            '<div class="folder-c '+(open?'open':'')+'">'+this.tree(n.c)+'</div>' +
+                        '</div>';
                 }
-                return \`
-                    <div class="row" onclick="\${onClick}">
-                        <div class="row-click-area">
-                            <div class="txt">
-                                <span style="font-weight:600;">\${n.title}</span>
-                                <span class="sub">\${n.freq.toFixed(3)} MHz \${n.mode}</span>
-                            </div>
-                        </div>
-                        <div class="act">\${acts}</div>
-                    </div>\`;
+                return '<div class="row" onclick="'+onClick+'">' +
+                        '<div class="row-click-area">' +
+                            '<div class="txt">' +
+                                '<span style="font-weight:600;">'+n.title+'</span>' +
+                                '<span class="sub">'+n.freq.toFixed(3)+' MHz '+n.mode+'</span>' +
+                            '</div>' +
+                        '</div>' +
+                        '<div class="act">'+acts+'</div>' +
+                    '</div>';
             }).join('');
         },
         tog(id) {
@@ -1343,19 +1309,19 @@ const htmlContent = `
             this.renderBM();
         },
         renderRec(list) {
-            document.getElementById('listRec').innerHTML = list.map(f => \`
-                <div class="row">
-                    <div class="row-click-area">
-                        <div class="txt">
-                            <span style="font-weight:600;">\${f.name.split('_')[2]||f.name}</span>
-                            <span class="sub">\${(f.size/1024/1024).toFixed(2)} MB</span>
-                        </div>
-                    </div>
-                    <div class="act">
-                        <a href="/download/\${f.name}" class="ib" download><span class="material-symbols-outlined">download</span></a>
-                        <button class="ib ib-del" onclick="window.ws.delRec('\${f.name}')"><span class="material-symbols-outlined">delete</span></button>
-                    </div>
-                </div>\`).join('');
+            document.getElementById('listRec').innerHTML = list.map(f => 
+                '<div class="row">' +
+                    '<div class="row-click-area">' +
+                        '<div class="txt">' +
+                            '<span style="font-weight:600;">'+(f.name.split('_')[2]||f.name)+'</span>' +
+                            '<span class="sub">'+(f.size/1024/1024).toFixed(2)+' MB</span>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="act">' +
+                        '<a href="/download/'+f.name+'" class="ib" download><span class="material-symbols-outlined">download</span></a>' +
+                        '<button class="ib ib-del" onclick="window.ws.delRec(\''+f.name+'\')"><span class="material-symbols-outlined">delete</span></button>' +
+                    '</div>' +
+                '</div>').join('');
         }
     };
 
