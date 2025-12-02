@@ -197,6 +197,28 @@ func (d *AudioDSP) Process(input []byte, threshold int) ProcessResult {
 // 4. システム & グローバル変数
 // ==========================================
 
+// SafeClient wraps websocket connection with a mutex to prevent concurrent writes
+type SafeClient struct {
+	Conn *websocket.Conn
+	mu   sync.Mutex
+}
+
+func (c *SafeClient) WriteMessage(messageType int, data []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Conn.WriteMessage(messageType, data)
+}
+
+func (c *SafeClient) WriteJSON(v interface{}) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Conn.WriteJSON(v)
+}
+
+func (c *SafeClient) Close() error {
+	return c.Conn.Close()
+}
+
 var (
 	state = ServerState{
 		Freq:        InitialFreq,
@@ -208,7 +230,7 @@ var (
 	bookmarks []Bookmark
 	squelchDB = make(map[string]int)
 	
-	clients   = make(map[*websocket.Conn]bool)
+	clients   = make(map[*SafeClient]bool) // Changed to SafeClient
 	broadcast = make(chan []byte)
 	statusMsg = make(chan []byte)
 	clientsMu sync.Mutex
@@ -519,6 +541,7 @@ func handleMessages() {
 		case audio := <-broadcast:
 			clientsMu.Lock()
 			for client := range clients {
+				// Use SafeClient's mutex-protected write
 				err := client.WriteMessage(websocket.BinaryMessage, audio)
 				if err != nil {
 					client.Close()
@@ -529,6 +552,7 @@ func handleMessages() {
 		case msg := <-statusMsg:
 			clientsMu.Lock()
 			for client := range clients {
+				// Use SafeClient's mutex-protected write
 				client.WriteMessage(websocket.TextMessage, msg)
 			}
 			clientsMu.Unlock()
@@ -540,14 +564,18 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil { return }
 	
+	// Create safe client wrapper
+	client := &SafeClient{Conn: ws}
+
 	clientsMu.Lock()
-	clients[ws] = true
+	clients[client] = true
 	clientsMu.Unlock()
 
 	broadcastStatus()
 	
 	bmMsg, _ := json.Marshal(map[string]interface{}{"type": "bookmarks", "data": bookmarks})
-	ws.WriteMessage(websocket.TextMessage, bmMsg)
+	// Use SafeClient's write
+	client.WriteMessage(websocket.TextMessage, bmMsg)
 	
 	broadcastRecordings()
 
@@ -555,7 +583,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		_, msg, err := ws.ReadMessage()
 		if err != nil {
 			clientsMu.Lock()
-			delete(clients, ws)
+			delete(clients, client)
 			clientsMu.Unlock()
 			break
 		}
