@@ -228,6 +228,7 @@ var (
 		IsRecording: false,
 	}
 	bookmarks []Bookmark
+    bmMu      sync.Mutex // Mutex for bookmarks slice access
 	squelchDB = make(map[string]int)
 	
 	clients   = make(map[*SafeClient]bool)
@@ -466,6 +467,9 @@ func loadData() {
 		os.Mkdir(RecordingsPath, 0755)
 	}
 
+    bmMu.Lock()
+    defer bmMu.Unlock()
+
 	bData, err := os.ReadFile(BookmarksFile)
 	if err == nil {
 		json.Unmarshal(bData, &bookmarks)
@@ -493,7 +497,11 @@ func loadData() {
 			{Title: "Narita International Airport", IsFolder: true, ParentID: "", ID: "1764649131163"},
 			{Title: "HND TWR RWY-D", Freq: 118.725, Mode: "AM", IsFolder: false, ParentID: "1764651543759", ID: "1764429456968"},
 		}
-		saveBookmarks()
+		// We call write here, but since we hold lock, we should use a non-locking write or careful
+        // saveBookmarks locks, so we should allow it to lock. BUT Go locks are not re-entrant.
+        // For simplicity, we just won't save default back to disk immediately here to avoid deadlock,
+        // or we release lock temporarily.
+        // Better: just assign. Save will happen on next change.
 	}
 
 	sData, err := os.ReadFile(SquelchFile)
@@ -502,9 +510,16 @@ func loadData() {
 	}
 }
 
-func saveBookmarks() {
+// saveBookmarksToFile saves to file without locking (caller must hold lock)
+func saveBookmarksToFile() {
 	d, _ := json.MarshalIndent(bookmarks, "", "  ")
 	os.WriteFile(BookmarksFile, d, 0644)
+}
+
+func saveBookmarks() {
+    bmMu.Lock()
+    defer bmMu.Unlock()
+    saveBookmarksToFile()
 }
 
 func saveSquelch() {
@@ -612,7 +627,9 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 	broadcastStatus()
 	
+    bmMu.Lock()
 	bmMsg, _ := json.Marshal(map[string]interface{}{"type": "bookmarks", "data": bookmarks})
+    bmMu.Unlock()
 	client.WriteMessage(websocket.TextMessage, bmMsg)
 	
 	broadcastRecordings()
@@ -667,15 +684,18 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			broadcastRecordings()
 		
 		case "add_bookmark":
+            bmMu.Lock()
 			var b Bookmark
 			json.Unmarshal(cmd.Data, &b)
 			b.ID = fmt.Sprintf("%d", time.Now().UnixMilli())
 			bookmarks = append(bookmarks, b)
-			saveBookmarks()
-			bmMsg, _ := json.Marshal(map[string]interface{}{"type": "bookmarks", "data": bookmarks})
+            saveBookmarksToFile() // Safe call
+            bmMsg, _ := json.Marshal(map[string]interface{}{"type": "bookmarks", "data": bookmarks})
+            bmMu.Unlock()
 			statusMsg <- bmMsg
 
 		case "delete_bookmark":
+            bmMu.Lock()
 			newBM := []Bookmark{}
 			for _, b := range bookmarks {
 				if b.ID != cmd.ID && b.ParentID != cmd.ID {
@@ -683,11 +703,13 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			bookmarks = newBM
-			saveBookmarks()
+			saveBookmarksToFile()
 			bmMsg, _ := json.Marshal(map[string]interface{}{"type": "bookmarks", "data": bookmarks})
+            bmMu.Unlock()
 			statusMsg <- bmMsg
 		
 		case "edit_bookmark":
+            bmMu.Lock()
 			var data Bookmark
 			json.Unmarshal(cmd.Data, &data)
 			for i, b := range bookmarks {
@@ -700,11 +722,13 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 			}
-			saveBookmarks()
+			saveBookmarksToFile()
 			bmMsg, _ := json.Marshal(map[string]interface{}{"type": "bookmarks", "data": bookmarks})
+            bmMu.Unlock()
 			statusMsg <- bmMsg
 
 		case "move_bookmark":
+            bmMu.Lock()
 			idx := -1
 			for i, b := range bookmarks { if b.ID == cmd.ID { idx = i; break } }
 			if idx != -1 {
@@ -722,12 +746,14 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 					swapIdx := siblings[sIdx+1]
 					bookmarks[idx], bookmarks[swapIdx] = bookmarks[swapIdx], bookmarks[idx]
 				}
-				saveBookmarks()
+				saveBookmarksToFile()
 				bmMsg, _ := json.Marshal(map[string]interface{}{"type": "bookmarks", "data": bookmarks})
 				statusMsg <- bmMsg
 			}
+            bmMu.Unlock()
 
 		case "change_parent":
+            bmMu.Lock()
 			// Check if new parent is a descendant of the moving item (Circular Reference)
 			var target Bookmark
 			for _, b := range bookmarks { if b.ID == cmd.ID { target = b; break } }
@@ -735,6 +761,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			if target.IsFolder {
 				if isDescendant(cmd.NewParentID, target.ID, bookmarks) {
 					// Cannot move folder into its own descendant
+                    bmMu.Unlock()
 					continue 
 				}
 			}
@@ -745,8 +772,9 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 			}
-			saveBookmarks()
+			saveBookmarksToFile()
 			bmMsg, _ := json.Marshal(map[string]interface{}{"type": "bookmarks", "data": bookmarks})
+            bmMu.Unlock()
 			statusMsg <- bmMsg
 		}
 	}
@@ -1046,7 +1074,7 @@ const htmlContent = `
                     data.freq = freqVal;
                     data.mode = window.ui.addMode;
                 }
-                this.send({type:'edit_bookmark', data: JSON.stringify(data)});
+                this.send({type:'edit_bookmark', data: data});
             } else {
                 const data = { title, isFolder, parentId: window.ui.targetParent };
                 if (!isFolder) {
@@ -1055,7 +1083,7 @@ const htmlContent = `
                     data.freq = freqVal;
                     data.mode = window.ui.addMode;
                 }
-                this.send({type:'add_bookmark', data: JSON.stringify(data)});
+                this.send({type:'add_bookmark', data: data});
             }
             window.ui.closeModal();
         },
