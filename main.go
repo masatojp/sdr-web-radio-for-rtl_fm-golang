@@ -230,7 +230,7 @@ var (
 	bookmarks []Bookmark
 	squelchDB = make(map[string]int)
 	
-	clients   = make(map[*SafeClient]bool) // Changed to SafeClient
+	clients   = make(map[*SafeClient]bool)
 	broadcast = make(chan []byte)
 	statusMsg = make(chan []byte)
 	clientsMu sync.Mutex
@@ -496,6 +496,28 @@ func saveSquelch() {
 // 9. WebSocket Handlers
 // ==========================================
 
+// Helper: Check if moving checkID to potentialAncestorID would cause a cycle
+func isDescendant(checkID, potentialAncestorID string, all []Bookmark) bool {
+	currentID := checkID
+	for {
+		if currentID == "" { return false } // Reached root, safe
+		if currentID == potentialAncestorID { return true } // Cycle detected
+		
+		// Find parent
+		parentID := ""
+		found := false
+		for _, b := range all {
+			if b.ID == currentID {
+				parentID = b.ParentID
+				found = true
+				break
+			}
+		}
+		if !found { return false } // Should not happen if data is consistent
+		currentID = parentID
+	}
+}
+
 func broadcastStatus() {
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -541,7 +563,6 @@ func handleMessages() {
 		case audio := <-broadcast:
 			clientsMu.Lock()
 			for client := range clients {
-				// Use SafeClient's mutex-protected write
 				err := client.WriteMessage(websocket.BinaryMessage, audio)
 				if err != nil {
 					client.Close()
@@ -552,7 +573,6 @@ func handleMessages() {
 		case msg := <-statusMsg:
 			clientsMu.Lock()
 			for client := range clients {
-				// Use SafeClient's mutex-protected write
 				client.WriteMessage(websocket.TextMessage, msg)
 			}
 			clientsMu.Unlock()
@@ -564,7 +584,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil { return }
 	
-	// Create safe client wrapper
 	client := &SafeClient{Conn: ws}
 
 	clientsMu.Lock()
@@ -574,7 +593,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	broadcastStatus()
 	
 	bmMsg, _ := json.Marshal(map[string]interface{}{"type": "bookmarks", "data": bookmarks})
-	// Use SafeClient's write
 	client.WriteMessage(websocket.TextMessage, bmMsg)
 	
 	broadcastRecordings()
@@ -690,6 +708,17 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case "change_parent":
+			// Check if new parent is a descendant of the moving item (Circular Reference)
+			var target Bookmark
+			for _, b := range bookmarks { if b.ID == cmd.ID { target = b; break } }
+			
+			if target.IsFolder {
+				if isDescendant(cmd.NewParentID, target.ID, bookmarks) {
+					// Cannot move folder into its own descendant
+					continue 
+				}
+			}
+
 			for i, b := range bookmarks {
 				if b.ID == cmd.ID && b.ID != cmd.NewParentID {
 					bookmarks[i].ParentID = cmd.NewParentID
@@ -704,13 +733,12 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // ==========================================
-// 10. Main & HTML Content (Fixed)
+// 10. Main & HTML Content (Fixed for Folder Move)
 // ==========================================
 
 func main() {
 	flag.Parse()
 	
-	// Load .env file
 	err := godotenv.Load()
 	if err != nil {
 		log.Println("Note: .env file not found, continuing without env vars")
@@ -741,7 +769,6 @@ func main() {
 	go sdrManager()
 	go handleMessages()
 
-	// Send notification after startup
 	go func() {
 		time.Sleep(2 * time.Second)
 		sendDiscordNotification()
@@ -751,7 +778,6 @@ func main() {
 	log.Fatal(http.ListenAndServe(Port, nil))
 }
 
-// HTML content with fixed string literals (replaced backticks with single quotes where possible)
 const htmlContent = `
 <!DOCTYPE html>
 <html lang="ja">
@@ -1241,9 +1267,17 @@ const htmlContent = `
                 html += '<div class="move-item" onclick="window.ws.changeParent(null)"><span class="material-symbols-outlined" style="margin-right:8px">home</span> ROOT</div>';
             }
             
-            const children = state.bm.filter(b => b.parentId === parentId && b.isFolder);
+            // Fix: correctly handle null/empty parentId logic
+            const children = state.bm.filter(b => {
+                if (!b.isFolder) return false;
+                if (parentId === null) return !b.parentId; 
+                return b.parentId === parentId;
+            });
+            
             children.forEach(c => {
+                // Prevent moving a folder into itself
                 if (c.id === state.moveTargetId) return; 
+
                 const pad = depth * 20;
                 html += '<div class="move-item" style="padding-left:'+(12+pad)+'px" onclick="window.ws.changeParent(\''+c.id+'\')"><span class="material-symbols-outlined" style="margin-right:8px">folder</span> '+c.title+'</div>';
                 html += this.genFolderListHtml(c.id, depth + 1);
