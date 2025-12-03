@@ -569,15 +569,30 @@ func startRecording() {
 		return
 	}
 
-	ts := time.Now().Format("2006-01-02T15-04-05")
+	// 1. 日時: YYYY-MM-DD_hhmmss
+	ts := time.Now().Format("2006-01-02_150405")
 	
-	// GPS情報がある場合はファイル名に付加
+	// 2. 周波数: xxx.xxxMHz
+	freqStr := fmt.Sprintf("%.3fMHz", float64(state.Freq)/1e6)
+
+	// 3. ブックマーク名（タイトル）がある場合
+	var titlePart string
+	if state.Title != "" {
+		// ファイル名に使用できない文字を置換
+		safeTitle := state.Title
+		replacer := strings.NewReplacer("/", "-", "\\", "-", ":", "-", "*", "-", "?", "-", "\"", "-", "<", "-", ">", "-", "|", "-")
+		safeTitle = replacer.Replace(safeTitle)
+		titlePart = "_" + safeTitle
+	}
+
+	// 4. GPS情報がある場合はファイル名に付加
 	var gpsInfo string
 	if state.GPSUnlocked && (state.Lat != 0 || state.Lon != 0) {
 		gpsInfo = fmt.Sprintf("_Lat%.4f_Lon%.4f", state.Lat, state.Lon)
 	}
 
-	filename := fmt.Sprintf("%s_%.3fMHz_%s%s.wav", state.Mode, float64(state.Freq)/1e6, ts, gpsInfo)
+	// 結合: YYYY-MM-DD_hhmmss_周波数_ブックマーク名_GPS座標.wav
+	filename := fmt.Sprintf("%s_%s%s%s.wav", ts, freqStr, titlePart, gpsInfo)
 	path := filepath.Join(RecordingsPath, filename)
 	
 	// ファイル作成などのI/O操作の前に一旦ロックを外すことも可能だが、
