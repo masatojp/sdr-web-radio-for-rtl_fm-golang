@@ -1411,7 +1411,7 @@ const htmlContent = `
                 marker = L.marker([35.6895, 139.6917]).addTo(map);
                 
                 // Fix map render issue when hidden initially
-                setTimeout(() => map.invalidateSize(), 100);
+                setTimeout(() => map.invalidateSize(), 200);
             }
         },
 
@@ -1509,17 +1509,28 @@ const htmlContent = `
             if (m.gpsUnlocked) {
                 btnGPS.innerText = "LOCK MAP & GPS";
                 btnGPS.classList.add('active');
+                
+                // Check if map was hidden to fix Leaflet rendering issues
+                const wasHidden = mapContainer.style.display === 'none';
                 mapContainer.style.display = 'block';
                 addrDisp.innerText = m.address || '';
                 
                 // Initialize map once visible
-                if (!map) window.ui.initMap();
+                if (!map) {
+                    window.ui.initMap();
+                } else if (wasHidden) {
+                    // Force resize recalculation if it was hidden
+                    setTimeout(() => map.invalidateSize(), 100);
+                }
 
                 const mapMsg = document.getElementById('mapMsg');
                 if (m.gpsStatus === 'active' && m.lat && m.lon && m.lat !== 0 && m.lon !== 0) {
                     mapMsg.style.display = 'none';
-                    if (marker) marker.setLatLng([m.lat, m.lon]);
-                    if (map) map.setView([m.lat, m.lon]);
+                    const latLng = [m.lat, m.lon];
+                    if (marker) marker.setLatLng(latLng);
+                    if (map) {
+                        map.setView(latLng, 13); // Always center map on GPS update
+                    }
                 } else if (m.gpsStatus === 'searching') {
                     mapMsg.style.display = 'flex';
                     mapMsg.innerText = '📡 GPS信号を受信中...';
