@@ -324,7 +324,7 @@ func gpsManager() {
 
 	for {
 		// Configure serial port using stty (Linux/RPi specific)
-		exec.Command("stty", "-F", gpsPort, "9600", "raw", "-echo").Run()
+		exec.Command("stty", "-F", gpsPort, "38400", "raw", "-echo").Run()
 
 		f, err := os.Open(gpsPort)
 		if err != nil {
