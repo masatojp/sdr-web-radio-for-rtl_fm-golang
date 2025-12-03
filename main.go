@@ -354,9 +354,14 @@ func gpsManager() {
 		gpsPort = "/dev/ttyUSB0"
 	}
 
+	gpsBaud := os.Getenv("GPS_BAUD_RATE")
+	if gpsBaud == "" {
+		gpsBaud = "38400"
+	}
+
 	for {
 		// Configure serial port using stty (Linux/RPi specific)
-		exec.Command("stty", "-F", gpsPort, "38400", "raw", "-echo").Run()
+		exec.Command("stty", "-F", gpsPort, gpsBaud, "raw", "-echo").Run()
 
 		f, err := os.Open(gpsPort)
 		if err != nil {
