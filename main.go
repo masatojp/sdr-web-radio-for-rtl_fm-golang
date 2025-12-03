@@ -1140,7 +1140,10 @@ const htmlContent = `
     .move-item.selected { background: var(--acc-dim); border: 1px solid var(--acc); color: var(--acc); }
     
     /* Map Styles */
-    #map { width: 100%; height: 200px; border-radius: 12px; margin-top: 12px; border: 1px solid rgba(255,255,255,0.1); }
+    #map { width: 100%; height: 200px; border-radius: 12px; margin-top: 12px; border: 1px solid rgba(255,255,255,0.1); background: #222; }
+    /* Monochrome & Dark Theme Map Filter */
+    .leaflet-tile { filter: grayscale(100%) invert(100%) contrast(0.8); }
+    
     .leaflet-bar a { background-color: var(--panel) !important; color: var(--txt) !important; border-bottom: 1px solid rgba(255,255,255,0.2) !important; }
     .map-container { position: relative; width: 100%; height: 200px; margin-top: 12px; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1); display: none; }
     #map { width: 100%; height: 100%; margin: 0; border: none; }
