@@ -43,7 +43,7 @@ const (
 type ServerState struct {
 	Freq        int     `json:"freq"`
 	Mode        string  `json:"mode"`
-	Title       string  `json:"title"` // 追加: 現在のチャンネル名
+	Title       string  `json:"title"`
 	Att         string  `json:"att"`
 	Squelch     int     `json:"squelch"`
 	IsRecording bool    `json:"isRecording"`
@@ -65,7 +65,7 @@ type WSCommand struct {
 	Password    string          `json:"password,omitempty"`
 	Freq        float64         `json:"freq,omitempty"`
 	Mode        string          `json:"mode,omitempty"`
-	Title       string          `json:"title,omitempty"` // 追加: 選局時のタイトル
+	Title       string          `json:"title,omitempty"`
 	Att         string          `json:"att,omitempty"`
 	Val         int             `json:"val,omitempty"`
 	Filename    string          `json:"filename,omitempty"`
@@ -225,7 +225,7 @@ var (
 	state = ServerState{
 		Freq:        InitialFreq,
 		Mode:        InitialMode,
-		Title:       "", // 初期タイトル
+		Title:       "",
 		Att:         "off",
 		Squelch:     10,
 		IsRecording: false,
@@ -555,14 +555,21 @@ func isDescendant(checkID, potentialAncestorID string, all []Bookmark) bool {
 func broadcastStatus() {
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	
+	// 現在の接続数を安全に取得
+	clientsMu.Lock()
+	connCount := len(clients)
+	clientsMu.Unlock()
+
 	msg := map[string]interface{}{
 		"type":        "status_update",
 		"freq":        state.Freq,
 		"mode":        state.Mode,
-		"title":       state.Title, // タイトルを含める
+		"title":       state.Title,
 		"att":         state.Att,
 		"squelch":     state.Squelch,
 		"isRecording": state.IsRecording,
+		"connections": connCount, // 接続数を送信
 	}
 	bytes, _ := json.Marshal(msg)
 	statusMsg <- bytes
@@ -640,6 +647,8 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			clientsMu.Lock()
 			delete(clients, client)
 			clientsMu.Unlock()
+			// 切断時にもブロードキャストして接続数を更新
+			broadcastStatus()
 			break
 		}
 		
@@ -652,7 +661,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				state.mu.Lock()
 				state.Freq = int(cmd.Freq)
 				state.Mode = cmd.Mode
-				// タイトル更新（空の場合はクリア）
 				state.Title = cmd.Title
 				state.mu.Unlock()
 				k := fmt.Sprintf("%d", int(cmd.Freq))
@@ -691,7 +699,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			json.Unmarshal(cmd.Data, &b)
 			b.ID = fmt.Sprintf("%d", time.Now().UnixMilli())
 			bookmarks = append(bookmarks, b)
-            saveBookmarksToFile() // Safe call
+            saveBookmarksToFile() 
             bmMsg, _ := json.Marshal(map[string]interface{}{"type": "bookmarks", "data": bookmarks})
             bmMu.Unlock()
 			statusMsg <- bmMsg
@@ -756,13 +764,11 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 		case "change_parent":
             bmMu.Lock()
-			// Check if new parent is a descendant of the moving item (Circular Reference)
 			var target Bookmark
 			for _, b := range bookmarks { if b.ID == cmd.ID { target = b; break } }
 			
 			if target.IsFolder {
 				if isDescendant(cmd.NewParentID, target.ID, bookmarks) {
-					// Cannot move folder into its own descendant
                     bmMu.Unlock()
 					continue 
 				}
@@ -909,6 +915,8 @@ const htmlContent = `
                 <span class="badge" id="bdgMode">AM</span>
                 <span class="badge" id="bdgAtt" style="display:none">ATT</span>
                 <span class="badge badge-sql" id="bdgSql">MUTED</span>
+                <!-- Connection Count Badge -->
+                <span class="badge" id="bdgConn">👤 0</span>
             </div>
             <div class="channel-title" id="dspTitle"></div>
             <div class="freq" id="dspFreq">---.---</div>
@@ -1237,6 +1245,11 @@ const htmlContent = `
             document.getElementById('bdgMode').innerText = m.mode;
             document.getElementById('bdgAtt').style.display = m.att!=='off'?'inline-block':'none';
             document.getElementById('bdgAtt').innerText = 'ATT '+m.att.toUpperCase();
+            
+            // 接続数表示更新
+            if (m.connections !== undefined) {
+                document.getElementById('bdgConn').innerText = '👤 ' + m.connections;
+            }
             
             ['off','weak','mid','strong'].forEach(k => { 
                 const el = document.getElementById('att'+k.charAt(0).toUpperCase()+k.slice(1));
