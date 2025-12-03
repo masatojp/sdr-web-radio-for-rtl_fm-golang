@@ -563,16 +563,31 @@ func sdrManager() {
 
 func startRecording() {
 	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.IsRecording { return }
+	// Do NOT use defer state.mu.Unlock() here to prevent deadlock with broadcastStatus
+	if state.IsRecording {
+		state.mu.Unlock()
+		return
+	}
 
 	ts := time.Now().Format("2006-01-02T15-04-05")
-	filename := fmt.Sprintf("%s_%.3fMHz_%s.wav", state.Mode, float64(state.Freq)/1e6, ts)
+	
+	// GPS情報がある場合はファイル名に付加
+	var gpsInfo string
+	if state.GPSUnlocked && (state.Lat != 0 || state.Lon != 0) {
+		gpsInfo = fmt.Sprintf("_Lat%.4f_Lon%.4f", state.Lat, state.Lon)
+	}
+
+	filename := fmt.Sprintf("%s_%.3fMHz_%s%s.wav", state.Mode, float64(state.Freq)/1e6, ts, gpsInfo)
 	path := filepath.Join(RecordingsPath, filename)
+	
+	// ファイル作成などのI/O操作の前に一旦ロックを外すことも可能だが、
+	// 状態の整合性を保つため、かつファイル作成は比較的高速なためロック内で行う。
+	// ただし、エラー発生時は必ずUnlockしてリターンする必要がある。
 	
 	f, err := os.Create(path)
 	if err != nil {
 		log.Println("Rec error:", err)
+		state.mu.Unlock()
 		return
 	}
 	
@@ -580,9 +595,13 @@ func startRecording() {
 	
 	recMu.Lock()
 	recFile = f
+	recMu.Unlock()
+
 	state.IsRecording = true
 	state.RecFilename = filename
-	recMu.Unlock()
+	
+	// broadcastStatusを呼ぶ前に必ずロックを解放する
+	state.mu.Unlock()
 	
 	broadcastStatus()
 }
@@ -1411,7 +1430,7 @@ const htmlContent = `
                 marker = L.marker([35.6895, 139.6917]).addTo(map);
                 
                 // Fix map render issue when hidden initially
-                setTimeout(() => map.invalidateSize(), 200);
+                setTimeout(() => map.invalidateSize(), 100);
             }
         },
 
