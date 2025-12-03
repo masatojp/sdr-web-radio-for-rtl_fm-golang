@@ -390,35 +390,48 @@ func gpsManager() {
 					if parts[6] != "0" && len(parts[2]) > 0 && len(parts[4]) > 0 {
 						lat := parseNMEACoord(parts[2], parts[3])
 						lon := parseNMEACoord(parts[4], parts[5])
-						
+
+						// Check active listeners
+						clientsMu.Lock()
+						hasListeners := len(clients) > 0
+						clientsMu.Unlock()
+
 						state.mu.Lock()
 						updated := false
 						if state.GPSStatus != "active" {
 							state.GPSStatus = "active"
 							updated = true
 						}
-						
+
 						// Significant change check
 						dist := math.Abs(state.Lat-lat) + math.Abs(state.Lon-lon)
-						if dist > 0.0001 {
-							// Log to Standard Output (Requirement 1)
-							fmt.Printf("[GPS] Fix: Lat: %.6f, Lon: %.6f\n", lat, lon)
-							
+
+						// Update if significant move OR (listeners are active AND coordinates changed)
+						if dist > 0.0001 || (hasListeners && dist > 0) {
+							// Log to Standard Output
+							if hasListeners {
+								fmt.Printf("[GPS] Listener Active - Lat: %.6f, Lon: %.6f\n", lat, lon)
+							} else {
+								fmt.Printf("[GPS] Significant Move - Lat: %.6f, Lon: %.6f\n", lat, lon)
+							}
+
 							state.Lat = lat
 							state.Lon = lon
 							updated = true
-							
-							// Address Lookup (Requirement 2) - Sync call in goroutine
-							go func(la, lo float64) {
-								addr := reverseGeocode(la, lo)
-								if addr != "" {
-									state.mu.Lock()
-									state.Address = addr
-									state.mu.Unlock()
-									broadcastStatus()
-									fmt.Printf("[GPS] Address: %s\n", addr)
-								}
-							}(lat, lon)
+
+							// Address Lookup - Only on significant moves to protect API quota
+							if dist > 0.0001 {
+								go func(la, lo float64) {
+									addr := reverseGeocode(la, lo)
+									if addr != "" {
+										state.mu.Lock()
+										state.Address = addr
+										state.mu.Unlock()
+										broadcastStatus()
+										fmt.Printf("[GPS] Address: %s\n", addr)
+									}
+								}(lat, lon)
+							}
 						}
 						state.mu.Unlock()
 
