@@ -1184,12 +1184,12 @@ const htmlContent = `
 
     <div class="ovl" id="modalGPSAuth">
         <div class="card">
-            <div style="color:#fff; font-weight:700; font-size:1.2rem; margin-bottom:20px;">Unlock GPS</div>
-            <p style="color:var(--sub); margin-bottom:20px">Enter password to enable GPS tracking for all users.</p>
+            <div id="gpsModalTitle" style="color:#fff; font-weight:700; font-size:1.2rem; margin-bottom:20px;">Unlock GPS</div>
+            <p id="gpsModalDesc" style="color:var(--sub); margin-bottom:20px">Enter password to enable GPS tracking for all users.</p>
             <input type="password" class="inp" id="inpGPSPass" placeholder="GPS Password">
             <div style="display:flex; gap:10px;">
                 <button class="btn" style="flex:1" onclick="window.ui.closeModal()">CANCEL</button>
-                <button class="btn" style="flex:1; background:var(--acc); color:#000;" onclick="window.ws.authGPS()">UNLOCK</button>
+                <button id="btnGPSModalAction" class="btn" style="flex:1; background:var(--acc); color:#000;" onclick="window.ws.authGPS()">UNLOCK</button>
             </div>
         </div>
     </div>
@@ -1228,7 +1228,7 @@ const htmlContent = `
 <script>
     let audioCtx;
     let map, marker;
-    const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false, moveTargetId: null };
+    const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false, moveTargetId: null, gpsUnlocked: false };
     let nextStartTime = 0; 
 
     // WebSocket Definition
@@ -1361,6 +1361,18 @@ const htmlContent = `
         init() {
             if (window.ws) { window.ws.connect(); } 
             
+            // Map Init
+            if (document.getElementById('map')) {
+                map = L.map('map').setView([35.6895, 139.6917], 13);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    attribution: '&copy; OSM'
+                }).addTo(map);
+                marker = L.marker([35.6895, 139.6917]).addTo(map);
+                
+                // Fix map render issue when hidden initially
+                setTimeout(() => map.invalidateSize(), 100);
+            }
+
             if ('mediaSession' in navigator) {
                 const ms = navigator.mediaSession;
                 ms.setActionHandler('play', () => this.togAudio());
@@ -1464,6 +1476,7 @@ const htmlContent = `
 
             state.freq=m.freq; state.mode=m.mode; state.att=m.att; state.rec=m.isRecording; state.squelch=m.squelch;
             state.title=m.title;
+            state.gpsUnlocked = m.gpsUnlocked; // Save GPS state
             
             this.els.freq.innerText = (m.freq/1e6).toFixed(3);
             document.getElementById('dspTitle').innerText = m.title || '';
@@ -1552,6 +1565,13 @@ const htmlContent = `
                 this.selMod(state.mode); 
                 document.getElementById('inpPass').focus();
             } else if (type === 'auth_gps') {
+                const isLocked = !state.gpsUnlocked;
+                document.getElementById('gpsModalTitle').innerText = isLocked ? "Unlock GPS" : "Lock GPS";
+                document.getElementById('gpsModalDesc').innerText = isLocked ? 
+                    "Enter password to enable GPS tracking for all users." : 
+                    "Enter password to disable GPS tracking.";
+                document.getElementById('btnGPSModalAction').innerText = isLocked ? "UNLOCK" : "LOCK";
+                
                 document.getElementById('modalGPSAuth').style.display = 'flex';
                 document.getElementById('inpGPSPass').focus();
             } else if (type === 'add_folder' || type === 'add_freq') {
