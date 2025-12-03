@@ -15,6 +15,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,6 +49,8 @@ type ServerState struct {
 	Att         string  `json:"att"`
 	Squelch     int     `json:"squelch"`
 	IsRecording bool    `json:"isRecording"`
+	Lat         float64 `json:"lat"` // GPS Latitude
+	Lon         float64 `json:"lon"` // GPS Longitude
 	RecFilename string  `json:"-"`
 	mu          sync.Mutex
 }
@@ -229,6 +233,8 @@ var (
 		Att:         "off",
 		Squelch:     10,
 		IsRecording: false,
+		Lat:         0.0,
+		Lon:         0.0,
 	}
 	bookmarks []Bookmark
     bmMu      sync.Mutex // Mutex for bookmarks slice access
@@ -287,8 +293,77 @@ func sendDiscordNotification() {
 }
 
 // ==========================================
-// 6. SDR Manager
+// 6. SDR & GPS Manager
 // ==========================================
+
+// Parse NMEA coordinate (ddmm.mmmm -> decimal degrees)
+func parseNMEACoord(val, dir string) float64 {
+	if len(val) < 4 { return 0.0 }
+	// find decimal point or just assume last 7 chars are minutes
+	dot := strings.Index(val, ".")
+	if dot == -1 { return 0.0 }
+	
+	degStr := val[:dot-2]
+	minStr := val[dot-2:]
+	
+	deg, _ := strconv.ParseFloat(degStr, 64)
+	min, _ := strconv.ParseFloat(minStr, 64)
+	
+	res := deg + min/60.0
+	if dir == "S" || dir == "W" { res = -res }
+	return res
+}
+
+func gpsManager() {
+	gpsPort := os.Getenv("GPS_PORT")
+	if gpsPort == "" {
+		gpsPort = "/dev/ttyUSB0" // Default for many USB GPS
+	}
+
+	for {
+		// Configure serial port using stty (Linux/RPi specific)
+		exec.Command("stty", "-F", gpsPort, "9600", "raw", "-echo").Run()
+
+		f, err := os.Open(gpsPort)
+		if err != nil {
+			// Retry silently or log only once
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := scanner.Text()
+			// Parse $GNGGA or $GPGGA
+			if strings.Contains(line, "GGA") {
+				parts := strings.Split(line, ",")
+				if len(parts) >= 10 {
+					// Check fix quality (index 6): 0 = Invalid
+					if parts[6] != "0" && len(parts[2]) > 0 && len(parts[4]) > 0 {
+						lat := parseNMEACoord(parts[2], parts[3])
+						lon := parseNMEACoord(parts[4], parts[5])
+						
+						state.mu.Lock()
+						updated := false
+						// Update only if changed significantly to avoid spam
+						if math.Abs(state.Lat-lat) > 0.0001 || math.Abs(state.Lon-lon) > 0.0001 {
+							state.Lat = lat
+							state.Lon = lon
+							updated = true
+						}
+						state.mu.Unlock()
+
+						if updated {
+							broadcastStatus()
+						}
+					}
+				}
+			}
+		}
+		f.Close()
+		time.Sleep(1 * time.Second)
+	}
+}
 
 func sdrManager() {
 	var cmd *exec.Cmd
@@ -556,7 +631,6 @@ func broadcastStatus() {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	
-	// 現在の接続数を安全に取得
 	clientsMu.Lock()
 	connCount := len(clients)
 	clientsMu.Unlock()
@@ -569,7 +643,9 @@ func broadcastStatus() {
 		"att":         state.Att,
 		"squelch":     state.Squelch,
 		"isRecording": state.IsRecording,
-		"connections": connCount, // 接続数を送信
+		"connections": connCount,
+		"lat":         state.Lat,
+		"lon":         state.Lon,
 	}
 	bytes, _ := json.Marshal(msg)
 	statusMsg <- bytes
@@ -647,7 +723,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			clientsMu.Lock()
 			delete(clients, client)
 			clientsMu.Unlock()
-			// 切断時にもブロードキャストして接続数を更新
 			broadcastStatus()
 			break
 		}
@@ -789,7 +864,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // ==========================================
-// 10. Main & HTML Content (Fixed for Folder Move)
+// 10. Main & HTML Content
 // ==========================================
 
 func main() {
@@ -823,6 +898,7 @@ func main() {
 	http.HandleFunc("/ws", wsHandler)
 
 	go sdrManager()
+	go gpsManager() // GPS
 	go handleMessages()
 
 	go func() {
@@ -840,9 +916,11 @@ const htmlContent = `
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>SDR COMMANDER (Go)</title>
+<title>SDR COMMANDER</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@700&display=swap">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
+<!-- Leaflet CSS -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
 <style>
     :root { --bg: #050507; --panel: rgba(30, 30, 35, 0.7); --acc: #00ffc8; --acc-dim: rgba(0,255,200,0.15); --txt: #fff; --sub: #8b9bb4; --mute: #4a4a4a; --open: #00e676; --stop: #ff3b30; --warn: #ffcc00; }
     body { background: var(--bg); color: var(--txt); font-family: 'Inter', sans-serif; margin: 0; display: flex; justify-content: center; min-height: 100vh; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
@@ -906,7 +984,13 @@ const htmlContent = `
     .move-item { padding: 12px; background: rgba(255,255,255,0.05); border-radius: 8px; cursor: pointer; display: flex; align-items: center; transition: 0.2s; }
     .move-item:hover { background: rgba(255,255,255,0.1); }
     .move-item.selected { background: var(--acc-dim); border: 1px solid var(--acc); color: var(--acc); }
+    
+    /* Map Styles */
+    #map { width: 100%; height: 200px; border-radius: 12px; margin-top: 12px; border: 1px solid rgba(255,255,255,0.1); }
+    .leaflet-bar a { background-color: var(--panel) !important; color: var(--txt) !important; border-bottom: 1px solid rgba(255,255,255,0.2) !important; }
 </style>
+<!-- Leaflet JS -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 </head>
 <body>
     <div class="app">
@@ -915,7 +999,6 @@ const htmlContent = `
                 <span class="badge" id="bdgMode">AM</span>
                 <span class="badge" id="bdgAtt" style="display:none">ATT</span>
                 <span class="badge badge-sql" id="bdgSql">MUTED</span>
-                <!-- Connection Count Badge -->
                 <span class="badge" id="bdgConn">👤 0</span>
             </div>
             <div class="channel-title" id="dspTitle"></div>
@@ -935,8 +1018,11 @@ const htmlContent = `
                     <button class="btn-sq" onclick="window.ui.adjSq(10)">+10</button>
                 </div>
             </div>
+            
+            <div id="map"></div>
         </div>
 
+        <!-- Controls etc... -->
         <div class="ctrls">
             <button class="btn-audio-toggle" id="btnAudio" onclick="window.ui.togAudio()">
                 <span class="material-symbols-outlined">volume_up</span> START LISTENING
@@ -1020,6 +1106,7 @@ const htmlContent = `
 
 <script>
     let audioCtx;
+    let map, marker;
     const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false, moveTargetId: null };
     let nextStartTime = 0; 
 
@@ -1027,7 +1114,9 @@ const htmlContent = `
     window.ws = {
         c: null,
         connect() {
-            this.c = new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host + '/ws');
+            // Use window.location to derive WS URL
+            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            this.c = new WebSocket(proto + '//' + location.host + '/ws');
             this.c.binaryType = 'arraybuffer';
             this.c.onmessage = e => {
                 if(typeof e.data === 'string') {
@@ -1057,7 +1146,6 @@ const htmlContent = `
             const m = window.ui.modalMode; 
             if(!skip) { const v = parseFloat(document.getElementById('inpFreq').value); if(v) f = Math.floor(v*1e6); }
             const p = document.getElementById('inpPass').value;
-            // マニュアルチューニング時はタイトルをクリア
             this.send({type:'auth_tune', password:p, freq:f, mode:m, title:''});
             window.ui.closeModal();
         },
@@ -1071,7 +1159,6 @@ const htmlContent = `
                 window.ui.modal('tune');
                 return;
             }
-            // タイトル付きで選局
             this.send({type:'auth_tune', password:p, freq:Math.floor(f*1e6), mode:m, title:t});
             state.mode = m;
         },
@@ -1148,6 +1235,15 @@ const htmlContent = `
         init() {
             if (window.ws) { window.ws.connect(); } 
             
+            // Map Init
+            if (document.getElementById('map')) {
+                map = L.map('map').setView([35.6895, 139.6917], 13); // Default Tokyo
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    attribution: '&copy; OSM'
+                }).addTo(map);
+                marker = L.marker([35.6895, 139.6917]).addTo(map);
+            }
+
             if ('mediaSession' in navigator) {
                 const ms = navigator.mediaSession;
                 ms.setActionHandler('play', () => this.togAudio());
@@ -1218,7 +1314,6 @@ const htmlContent = `
             if (!('mediaSession' in navigator) || !audioCtx || audioCtx.state !== 'running') return;
             navigator.mediaSession.playbackState = 'playing';
             
-            // メタデータにもタイトル反映
             const titleStr = state.title ? state.title : (state.freq/1e6).toFixed(3) + ' MHz';
             const artistStr = state.mode + ' | SQL: ' + state.squelch + ' | ' + (state.rec ? '● REC' : 'LIVE');
             
@@ -1238,17 +1333,21 @@ const htmlContent = `
             const prevRec = state.rec;
 
             state.freq=m.freq; state.mode=m.mode; state.att=m.att; state.rec=m.isRecording; state.squelch=m.squelch;
-            state.title=m.title; // 状態更新
+            state.title=m.title;
             
             this.els.freq.innerText = (m.freq/1e6).toFixed(3);
-            document.getElementById('dspTitle').innerText = m.title || ''; // タイトル表示更新
+            document.getElementById('dspTitle').innerText = m.title || '';
             document.getElementById('bdgMode').innerText = m.mode;
             document.getElementById('bdgAtt').style.display = m.att!=='off'?'inline-block':'none';
             document.getElementById('bdgAtt').innerText = 'ATT '+m.att.toUpperCase();
             
-            // 接続数表示更新
             if (m.connections !== undefined) {
                 document.getElementById('bdgConn').innerText = '👤 ' + m.connections;
+            }
+
+            if (m.lat && m.lon && m.lat !== 0 && m.lon !== 0) {
+                if (marker) marker.setLatLng([m.lat, m.lon]);
+                if (map) map.setView([m.lat, m.lon], 13);
             }
             
             ['off','weak','mid','strong'].forEach(k => { 
@@ -1338,13 +1437,11 @@ const htmlContent = `
             
             const children = state.bm.filter(b => {
                 if (!b.isFolder) return false;
-                // Handle null/empty logic robustly
                 if (parentId === null) return !b.parentId || b.parentId === "null"; 
                 return b.parentId === parentId;
             });
             
             children.forEach(c => {
-                // Prevent moving a folder into itself, but allow showing other folders
                 if (c.id === state.moveTargetId) return; 
 
                 const pad = depth * 20;
@@ -1408,7 +1505,6 @@ const htmlContent = `
                     onClick = 'window.ui.tog(\''+n.id+'\')';
                 } else {
                     if (!isEdit) {
-                        // タイトルを安全に渡すためのエスケープ処理
                         const safeTitle = n.title.replace(/'/g, "\\'");
                         onClick = 'window.ws.tuneDir('+n.freq+', \''+n.mode+'\', \''+safeTitle+'\')';
                     } else {
