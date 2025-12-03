@@ -49,8 +49,9 @@ type ServerState struct {
 	Att         string  `json:"att"`
 	Squelch     int     `json:"squelch"`
 	IsRecording bool    `json:"isRecording"`
-	Lat         float64 `json:"lat"` // GPS Latitude
-	Lon         float64 `json:"lon"` // GPS Longitude
+	Lat         float64 `json:"lat"`       // GPS Latitude
+	Lon         float64 `json:"lon"`       // GPS Longitude
+	GPSStatus   string  `json:"gpsStatus"` // "disconnected", "searching", "active"
 	RecFilename string  `json:"-"`
 	mu          sync.Mutex
 }
@@ -235,6 +236,7 @@ var (
 		IsRecording: false,
 		Lat:         0.0,
 		Lon:         0.0,
+		GPSStatus:   "init",
 	}
 	bookmarks []Bookmark
     bmMu      sync.Mutex // Mutex for bookmarks slice access
@@ -326,9 +328,27 @@ func gpsManager() {
 
 		f, err := os.Open(gpsPort)
 		if err != nil {
-			// Retry silently or log only once
+			// Update status to disconnected
+			state.mu.Lock()
+			if state.GPSStatus != "disconnected" {
+				state.GPSStatus = "disconnected"
+				state.mu.Unlock()
+				broadcastStatus()
+			} else {
+				state.mu.Unlock()
+			}
 			time.Sleep(5 * time.Second)
 			continue
+		}
+
+		// Connected to port, searching for signal
+		state.mu.Lock()
+		if state.GPSStatus == "disconnected" || state.GPSStatus == "init" {
+			state.GPSStatus = "searching"
+			state.mu.Unlock()
+			broadcastStatus()
+		} else {
+			state.mu.Unlock()
 		}
 
 		scanner := bufio.NewScanner(f)
@@ -345,6 +365,10 @@ func gpsManager() {
 						
 						state.mu.Lock()
 						updated := false
+						if state.GPSStatus != "active" {
+							state.GPSStatus = "active"
+							updated = true
+						}
 						// Update only if changed significantly to avoid spam
 						if math.Abs(state.Lat-lat) > 0.0001 || math.Abs(state.Lon-lon) > 0.0001 {
 							state.Lat = lat
@@ -355,6 +379,16 @@ func gpsManager() {
 
 						if updated {
 							broadcastStatus()
+						}
+					} else {
+						// Signal lost or not fixed yet
+						state.mu.Lock()
+						if state.GPSStatus == "active" {
+							state.GPSStatus = "searching"
+							state.mu.Unlock()
+							broadcastStatus()
+						} else {
+							state.mu.Unlock()
 						}
 					}
 				}
@@ -646,6 +680,7 @@ func broadcastStatus() {
 		"connections": connCount,
 		"lat":         state.Lat,
 		"lon":         state.Lon,
+		"gpsStatus":   state.GPSStatus, // Status added
 	}
 	bytes, _ := json.Marshal(msg)
 	statusMsg <- bytes
@@ -988,6 +1023,14 @@ const htmlContent = `
     /* Map Styles */
     #map { width: 100%; height: 200px; border-radius: 12px; margin-top: 12px; border: 1px solid rgba(255,255,255,0.1); }
     .leaflet-bar a { background-color: var(--panel) !important; color: var(--txt) !important; border-bottom: 1px solid rgba(255,255,255,0.2) !important; }
+    .map-container { position: relative; width: 100%; height: 200px; margin-top: 12px; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1); }
+    #map { width: 100%; height: 100%; margin: 0; border: none; }
+    .map-overlay {
+        position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+        background: rgba(0,0,0,0.7); color: #fff; display: flex;
+        justify-content: center; align-items: center; z-index: 1000;
+        backdrop-filter: blur(2px); font-weight: bold;
+    }
 </style>
 <!-- Leaflet JS -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
@@ -1019,7 +1062,10 @@ const htmlContent = `
                 </div>
             </div>
             
-            <div id="map"></div>
+            <div class="map-container">
+                <div id="map"></div>
+                <div id="mapMsg" class="map-overlay">GPS信号を探しています...</div>
+            </div>
         </div>
 
         <!-- Controls etc... -->
@@ -1345,9 +1391,18 @@ const htmlContent = `
                 document.getElementById('bdgConn').innerText = '👤 ' + m.connections;
             }
 
-            if (m.lat && m.lon && m.lat !== 0 && m.lon !== 0) {
+            // Map Update Logic
+            const mapMsg = document.getElementById('mapMsg');
+            if (m.gpsStatus === 'active' && m.lat && m.lon && m.lat !== 0 && m.lon !== 0) {
+                mapMsg.style.display = 'none';
                 if (marker) marker.setLatLng([m.lat, m.lon]);
-                if (map) map.setView([m.lat, m.lon], 13);
+                if (map) map.setView([m.lat, m.lon]);
+            } else if (m.gpsStatus === 'searching') {
+                mapMsg.style.display = 'flex';
+                mapMsg.innerText = '📡 GPS信号を受信中...';
+            } else if (m.gpsStatus === 'disconnected') {
+                mapMsg.style.display = 'flex';
+                mapMsg.innerText = '⚠️ GPSモジュール未接続';
             }
             
             ['off','weak','mid','strong'].forEach(k => { 
