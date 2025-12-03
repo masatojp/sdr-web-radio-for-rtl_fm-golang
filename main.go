@@ -359,6 +359,9 @@ func gpsManager() {
 		gpsBaud = "38400"
 	}
 
+	// Track the last update time
+	var lastUpdate time.Time
+
 	for {
 		// Configure serial port using stty (Linux/RPi specific)
 		exec.Command("stty", "-F", gpsPort, gpsBaud, "raw", "-echo").Run()
@@ -389,6 +392,22 @@ func gpsManager() {
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
 			line := scanner.Text()
+
+			// 1. アクティブユーザー確認 (Check for active listeners)
+			clientsMu.Lock()
+			hasListeners := len(clients) > 0
+			clientsMu.Unlock()
+
+			// ユーザーがいなければ処理をスキップ（読み捨て）
+			if !hasListeners {
+				continue
+			}
+
+			// 2. 15秒間隔チェック (Check 15s interval)
+			if time.Since(lastUpdate) < 15*time.Second {
+				continue
+			}
+
 			if strings.Contains(line, "GGA") {
 				parts := strings.Split(line, ",")
 				if len(parts) >= 10 {
@@ -396,10 +415,8 @@ func gpsManager() {
 						lat := parseNMEACoord(parts[2], parts[3])
 						lon := parseNMEACoord(parts[4], parts[5])
 
-						// Check active listeners
-						clientsMu.Lock()
-						hasListeners := len(clients) > 0
-						clientsMu.Unlock()
+						// Update timestamp immediately after receiving valid data
+						lastUpdate = time.Now()
 
 						state.mu.Lock()
 						updated := false
@@ -408,35 +425,28 @@ func gpsManager() {
 							updated = true
 						}
 
-						// Significant change check
+						// Log to Standard Output
+						fmt.Printf("[GPS] Update (15s) - Lat: %.6f, Lon: %.6f\n", lat, lon)
+
+						// Significant change check for Address Lookup
 						dist := math.Abs(state.Lat-lat) + math.Abs(state.Lon-lon)
+						
+						state.Lat = lat
+						state.Lon = lon
+						updated = true
 
-						// Update if significant move OR (listeners are active AND coordinates changed)
-						if dist > 0.0001 || (hasListeners && dist > 0) {
-							// Log to Standard Output
-							if hasListeners {
-								fmt.Printf("[GPS] Listener Active - Lat: %.6f, Lon: %.6f\n", lat, lon)
-							} else {
-								fmt.Printf("[GPS] Significant Move - Lat: %.6f, Lon: %.6f\n", lat, lon)
-							}
-
-							state.Lat = lat
-							state.Lon = lon
-							updated = true
-
-							// Address Lookup - Only on significant moves to protect API quota
-							if dist > 0.0001 {
-								go func(la, lo float64) {
-									addr := reverseGeocode(la, lo)
-									if addr != "" {
-										state.mu.Lock()
-										state.Address = addr
-										state.mu.Unlock()
-										broadcastStatus()
-										fmt.Printf("[GPS] Address: %s\n", addr)
-									}
-								}(lat, lon)
-							}
+						// Address Lookup - Only on significant moves to protect API quota
+						if dist > 0.0001 {
+							go func(la, lo float64) {
+								addr := reverseGeocode(la, lo)
+								if addr != "" {
+									state.mu.Lock()
+									state.Address = addr
+									state.mu.Unlock()
+									broadcastStatus()
+									fmt.Printf("[GPS] Address Updated: %s\n", addr)
+								}
+							}(lat, lon)
 						}
 						state.mu.Unlock()
 
