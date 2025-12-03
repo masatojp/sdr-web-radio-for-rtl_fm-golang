@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -51,7 +53,9 @@ type ServerState struct {
 	IsRecording bool    `json:"isRecording"`
 	Lat         float64 `json:"lat"`       // GPS Latitude
 	Lon         float64 `json:"lon"`       // GPS Longitude
+	Address     string  `json:"address"`   // Reverse Geocoded Address
 	GPSStatus   string  `json:"gpsStatus"` // "disconnected", "searching", "active"
+	GPSUnlocked bool    `json:"gpsUnlocked"`
 	RecFilename string  `json:"-"`
 	mu          sync.Mutex
 }
@@ -68,6 +72,7 @@ type Bookmark struct {
 type WSCommand struct {
 	Type        string          `json:"type"`
 	Password    string          `json:"password,omitempty"`
+	GPSPassword string          `json:"gpsPassword,omitempty"` // GPSロック解除用
 	Freq        float64         `json:"freq,omitempty"`
 	Mode        string          `json:"mode,omitempty"`
 	Title       string          `json:"title,omitempty"`
@@ -78,6 +83,11 @@ type WSCommand struct {
 	ID          string          `json:"id,omitempty"`
 	Dir         string          `json:"dir,omitempty"`
 	NewParentID string          `json:"newParentId,omitempty"`
+}
+
+// Nominatim Response
+type NominatimResponse struct {
+	DisplayName string `json:"display_name"`
 }
 
 // Discord Payload Structure
@@ -236,10 +246,12 @@ var (
 		IsRecording: false,
 		Lat:         0.0,
 		Lon:         0.0,
+		Address:     "",
 		GPSStatus:   "init",
+		GPSUnlocked: false, // Default Locked
 	}
 	bookmarks []Bookmark
-    bmMu      sync.Mutex // Mutex for bookmarks slice access
+    bmMu      sync.Mutex
 	squelchDB = make(map[string]int)
 	
 	clients   = make(map[*SafeClient]bool)
@@ -298,10 +310,30 @@ func sendDiscordNotification() {
 // 6. SDR & GPS Manager
 // ==========================================
 
-// Parse NMEA coordinate (ddmm.mmmm -> decimal degrees)
+// Reverse Geocoding via Nominatim
+func reverseGeocode(lat, lon float64) string {
+	url := fmt.Sprintf("https://nominatim.openstreetmap.org/reverse?format=json&lat=%f&lon=%f", lat, lon)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil { return "" }
+	
+	// Nominatim requires User-Agent
+	req.Header.Set("User-Agent", "SDR-Commander-Go/1.0")
+	
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil { return "" }
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 { return "" }
+
+	var data NominatimResponse
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil { return "" }
+	
+	return data.DisplayName
+}
+
 func parseNMEACoord(val, dir string) float64 {
 	if len(val) < 4 { return 0.0 }
-	// find decimal point or just assume last 7 chars are minutes
 	dot := strings.Index(val, ".")
 	if dot == -1 { return 0.0 }
 	
@@ -319,7 +351,7 @@ func parseNMEACoord(val, dir string) float64 {
 func gpsManager() {
 	gpsPort := os.Getenv("GPS_PORT")
 	if gpsPort == "" {
-		gpsPort = "/dev/ttyUSB0" // Default for many USB GPS
+		gpsPort = "/dev/ttyUSB0"
 	}
 
 	for {
@@ -328,7 +360,6 @@ func gpsManager() {
 
 		f, err := os.Open(gpsPort)
 		if err != nil {
-			// Update status to disconnected
 			state.mu.Lock()
 			if state.GPSStatus != "disconnected" {
 				state.GPSStatus = "disconnected"
@@ -341,7 +372,6 @@ func gpsManager() {
 			continue
 		}
 
-		// Connected to port, searching for signal
 		state.mu.Lock()
 		if state.GPSStatus == "disconnected" || state.GPSStatus == "init" {
 			state.GPSStatus = "searching"
@@ -354,11 +384,9 @@ func gpsManager() {
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
 			line := scanner.Text()
-			// Parse $GNGGA or $GPGGA
 			if strings.Contains(line, "GGA") {
 				parts := strings.Split(line, ",")
 				if len(parts) >= 10 {
-					// Check fix quality (index 6): 0 = Invalid
 					if parts[6] != "0" && len(parts[2]) > 0 && len(parts[4]) > 0 {
 						lat := parseNMEACoord(parts[2], parts[3])
 						lon := parseNMEACoord(parts[4], parts[5])
@@ -369,11 +397,28 @@ func gpsManager() {
 							state.GPSStatus = "active"
 							updated = true
 						}
-						// Update only if changed significantly to avoid spam
-						if math.Abs(state.Lat-lat) > 0.0001 || math.Abs(state.Lon-lon) > 0.0001 {
+						
+						// Significant change check
+						dist := math.Abs(state.Lat-lat) + math.Abs(state.Lon-lon)
+						if dist > 0.0001 {
+							// Log to Standard Output (Requirement 1)
+							fmt.Printf("[GPS] Fix: Lat: %.6f, Lon: %.6f\n", lat, lon)
+							
 							state.Lat = lat
 							state.Lon = lon
 							updated = true
+							
+							// Address Lookup (Requirement 2) - Sync call in goroutine
+							go func(la, lo float64) {
+								addr := reverseGeocode(la, lo)
+								if addr != "" {
+									state.mu.Lock()
+									state.Address = addr
+									state.mu.Unlock()
+									broadcastStatus()
+									fmt.Printf("[GPS] Address: %s\n", addr)
+								}
+							}(lat, lon)
 						}
 						state.mu.Unlock()
 
@@ -381,7 +426,6 @@ func gpsManager() {
 							broadcastStatus()
 						}
 					} else {
-						// Signal lost or not fixed yet
 						state.mu.Lock()
 						if state.GPSStatus == "active" {
 							state.GPSStatus = "searching"
@@ -579,36 +623,15 @@ func loadData() {
 		os.Mkdir(RecordingsPath, 0755)
 	}
 
-    bmMu.Lock()
-    defer bmMu.Unlock()
+	bmMu.Lock()
+	defer bmMu.Unlock()
 
 	bData, err := os.ReadFile(BookmarksFile)
 	if err == nil {
 		json.Unmarshal(bData, &bookmarks)
 	} else {
-		// Use the provided JSON data as default
-		bookmarks = []Bookmark{
-			{Title: "Sendai Airport", IsFolder: true, ParentID: "", ID: "1763731824815"},
-			{Title: "SDJ ATIS", Freq: 126.45, Mode: "AM", IsFolder: false, ParentID: "1763731824815", ID: "1763731847585"},
-			{Title: "SDJ TWR", Freq: 118.7, Mode: "AM", IsFolder: false, ParentID: "1763731824815", ID: "1763731881249"},
-			{Title: "SDJ GND", Freq: 121.7, Mode: "AM", IsFolder: false, ParentID: "1763731824815", ID: "1763731893279"},
-			{Title: "SDJ APP", Freq: 120.4, Mode: "AM", IsFolder: false, ParentID: "1763731824815", ID: "1763731912991"},
-			{Title: "Sendai FM Radio", IsFolder: true, ParentID: "", ID: "1763731929504"},
-			{Title: "TBC FM", Freq: 93.5, Mode: "WFM", IsFolder: false, ParentID: "1763731929504", ID: "1763731978016"},
-			{Title: "Date FM", Freq: 77.1, Mode: "WFM", IsFolder: false, ParentID: "1763731929504", ID: "1763732002721"},
-			{Title: "NHK-FM Sendai", Freq: 82.5, Mode: "WFM", IsFolder: false, ParentID: "1763731929504", ID: "1763731963953"},
-			{Title: "Tokyo FM Radio", IsFolder: true, ParentID: "", ID: "1764482175943"},
-			{Title: "HND ATIS", Freq: 128.8, Mode: "AM", IsFolder: false, ParentID: "1764429116145", ID: "1764429481611"},
-			{Title: "HND TWR RWY-A", Freq: 118.1, Mode: "AM", IsFolder: false, ParentID: "1764429116145", ID: "1764429162285"},
-			{Title: "HND TWR RWY-B", Freq: 118.575, Mode: "AM", IsFolder: false, ParentID: "1764429116145", ID: "1764429393136"},
-			{Title: "HND TWR RWY-C/RWY23", Freq: 124.35, Mode: "AM", IsFolder: false, ParentID: "1764429116145", ID: "1764429422892"},
-			{Title: "TWR", IsFolder: true, ParentID: "1764429116145", ID: "1764651543759"},
-			{Title: "Tokyo International Airport", IsFolder: true, ParentID: "", ID: "1764429116145"},
-			{Title: " Tokyo FM", Freq: 80, Mode: "FM", IsFolder: false, ParentID: "1764482175943", ID: "1764482208041"},
-			{Title: "なとらじ", Freq: 80.1, Mode: "WFM", IsFolder: false, ParentID: "1763731929504", ID: "1764553047184"},
-			{Title: "Narita International Airport", IsFolder: true, ParentID: "", ID: "1764649131163"},
-			{Title: "HND TWR RWY-D", Freq: 118.725, Mode: "AM", IsFolder: false, ParentID: "1764651543759", ID: "1764429456968"},
-		}
+		// Default to empty if file not found
+		bookmarks = []Bookmark{}
 		saveBookmarksToFile()
 	}
 
@@ -639,14 +662,12 @@ func saveSquelch() {
 // 9. WebSocket Handlers
 // ==========================================
 
-// Helper: Check if moving checkID to potentialAncestorID would cause a cycle
 func isDescendant(checkID, potentialAncestorID string, all []Bookmark) bool {
 	currentID := checkID
 	for {
-		if currentID == "" { return false } // Reached root, safe
-		if currentID == potentialAncestorID { return true } // Cycle detected
+		if currentID == "" { return false }
+		if currentID == potentialAncestorID { return true }
 		
-		// Find parent
 		parentID := ""
 		found := false
 		for _, b := range all {
@@ -656,7 +677,7 @@ func isDescendant(checkID, potentialAncestorID string, all []Bookmark) bool {
 				break
 			}
 		}
-		if !found { return false } // Should not happen if data is consistent
+		if !found { return false }
 		currentID = parentID
 	}
 }
@@ -669,6 +690,20 @@ func broadcastStatus() {
 	connCount := len(clients)
 	clientsMu.Unlock()
 
+	// 🔒 Security: Hide GPS info if not unlocked
+	var lat, lon float64
+	var addr, gpsStatus string
+	if state.GPSUnlocked {
+		lat, lon = state.Lat, state.Lon
+		addr = state.Address
+		gpsStatus = state.GPSStatus
+	} else {
+		// Send neutral state if locked
+		lat, lon = 0, 0
+		addr = ""
+		gpsStatus = "locked" 
+	}
+
 	msg := map[string]interface{}{
 		"type":        "status_update",
 		"freq":        state.Freq,
@@ -678,9 +713,11 @@ func broadcastStatus() {
 		"squelch":     state.Squelch,
 		"isRecording": state.IsRecording,
 		"connections": connCount,
-		"lat":         state.Lat,
-		"lon":         state.Lon,
-		"gpsStatus":   state.GPSStatus, // Status added
+		"lat":         lat,
+		"lon":         lon,
+		"address":     addr,
+		"gpsStatus":   gpsStatus,
+		"gpsUnlocked": state.GPSUnlocked,
 	}
 	bytes, _ := json.Marshal(msg)
 	statusMsg <- bytes
@@ -733,6 +770,15 @@ func handleMessages() {
 	}
 }
 
+func checkGPSHash(inputPass string) bool {
+	targetHash := os.Getenv("GPS_AUTH_HASH")
+	if targetHash == "" { return false }
+	
+	sum := sha256.Sum256([]byte(inputPass))
+	inputHash := hex.EncodeToString(sum[:])
+	return inputHash == targetHash
+}
+
 func wsHandler(w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil { return }
@@ -782,6 +828,16 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				go func() { cmdChan <- true }()
 				broadcastStatus()
 			}
+		
+		case "auth_gps":
+			// GPS Lock Logic
+			if checkGPSHash(cmd.GPSPassword) {
+				state.mu.Lock()
+				state.GPSUnlocked = !state.GPSUnlocked // Toggle Lock/Unlock
+				state.mu.Unlock()
+				broadcastStatus() // Updates ALL clients
+			}
+
 		case "set_att":
 			state.mu.Lock()
 			state.Att = cmd.Att
@@ -961,13 +1017,14 @@ const htmlContent = `
     body { background: var(--bg); color: var(--txt); font-family: 'Inter', sans-serif; margin: 0; display: flex; justify-content: center; min-height: 100vh; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
     .app { width: 100%; max-width: 480px; padding: 20px 20px 100px; box-sizing: border-box; }
     .panel { background: var(--panel); backdrop-filter: blur(12px); border-radius: 16px; border: 1px solid rgba(255,255,255,0.08); padding: 20px; margin-bottom: 16px; }
-    .freq { font-family: 'JetBrains Mono', monospace; font-size: 3.2rem; text-align: center; font-weight: 700; line-height: 1; text-shadow: 0 0 20px var(--acc-dim); margin: 10px 0; }
+    .freq { font-family: 'JetBrains Mono', monospace; font-size: 3.2rem; text-align: center; font-weight: 700; line-height: 1; text-shadow: 0 0 20px var(--acc-dim); margin: 5px 0 0 0; }
     .channel-title { font-family: 'Inter', sans-serif; font-size: 1.2rem; text-align: center; color: var(--acc); font-weight: 600; min-height: 1.5em; text-shadow: 0 0 10px rgba(0,255,200,0.3); margin-top: 10px; }
+    .address-display { font-size: 0.8rem; text-align: center; color: var(--sub); margin-bottom: 5px; min-height: 1em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .badges { display: flex; justify-content: center; gap: 8px; }
     .badge { font-size: 0.75rem; padding: 4px 10px; border-radius: 20px; background: rgba(255,255,255,0.05); color: var(--sub); border: 1px solid rgba(255,255,255,0.05); transition: 0.2s; }
     .badge-sql { background: var(--mute); color: #ccc; }
     .badge-sql.open { background: var(--open); color: #000; box-shadow: 0 0 10px var(--open); font-weight: bold; }
-    .meter-wrap { position: relative; height: 32px; margin-top: 20px; border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; overflow: hidden; background: #111; }
+    .meter-wrap { position: relative; height: 32px; margin-top: 15px; border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; overflow: hidden; background: #111; }
     .meter-fill { height: 100%; width: 0%; background: var(--mute); transition: width 0.05s ease-out, background 0.1s; }
     .meter-fill.active { background: var(--open); box-shadow: 0 0 15px var(--open); }
     .sq-mark { position: absolute; top: 0; bottom: 0; width: 2px; background: #ffd700; z-index: 5; transition: left 0.1s; box-shadow: 0 0 8px #ffd700; }
@@ -1023,14 +1080,15 @@ const htmlContent = `
     /* Map Styles */
     #map { width: 100%; height: 200px; border-radius: 12px; margin-top: 12px; border: 1px solid rgba(255,255,255,0.1); }
     .leaflet-bar a { background-color: var(--panel) !important; color: var(--txt) !important; border-bottom: 1px solid rgba(255,255,255,0.2) !important; }
-    .map-container { position: relative; width: 100%; height: 200px; margin-top: 12px; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1); }
+    .map-container { position: relative; width: 100%; height: 200px; margin-top: 12px; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1); display: none; }
     #map { width: 100%; height: 100%; margin: 0; border: none; }
     .map-overlay {
         position: absolute; top: 0; left: 0; width: 100%; height: 100%;
         background: rgba(0,0,0,0.7); color: #fff; display: flex;
         justify-content: center; align-items: center; z-index: 1000;
-        backdrop-filter: blur(2px); font-weight: bold;
+        backdrop-filter: blur(2px); font-weight: bold; flex-direction: column; gap:10px;
     }
+    .btn-unlock { background: var(--acc); color:#000; font-weight:bold; padding:8px 16px; border-radius:8px; border:none; cursor:pointer; }
 </style>
 <!-- Leaflet JS -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
@@ -1046,6 +1104,8 @@ const htmlContent = `
             </div>
             <div class="channel-title" id="dspTitle"></div>
             <div class="freq" id="dspFreq">---.---</div>
+            <div class="address-display" id="dspAddr"></div>
+            
             <div class="meter-wrap">
                 <div class="meter-fill" id="dspRssi"></div>
                 <div class="sq-mark" id="sqMarker" style="left:10%"></div>
@@ -1062,9 +1122,12 @@ const htmlContent = `
                 </div>
             </div>
             
-            <div class="map-container">
+            <!-- Map Container starts hidden -->
+            <button id="btnGPSAuth" class="btn" style="margin-top:10px; width:100%" onclick="window.ui.modal('auth_gps')">UNLOCK MAP & GPS</button>
+            
+            <div class="map-container" id="mapContainer">
                 <div id="map"></div>
-                <div id="mapMsg" class="map-overlay">GPS信号を探しています...</div>
+                <div id="mapMsg" class="map-overlay"></div>
             </div>
         </div>
 
@@ -1115,6 +1178,18 @@ const htmlContent = `
             <div style="display:flex; gap:10px;">
                 <button class="btn" style="flex:1" onclick="window.ui.closeModal()">CANCEL</button>
                 <button class="btn" style="flex:1; background:var(--acc); color:#000;" onclick="window.ws.tune()">TUNE</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="ovl" id="modalGPSAuth">
+        <div class="card">
+            <div style="color:#fff; font-weight:700; font-size:1.2rem; margin-bottom:20px;">Unlock GPS</div>
+            <p style="color:var(--sub); margin-bottom:20px">Enter password to enable GPS tracking for all users.</p>
+            <input type="password" class="inp" id="inpGPSPass" placeholder="GPS Password">
+            <div style="display:flex; gap:10px;">
+                <button class="btn" style="flex:1" onclick="window.ui.closeModal()">CANCEL</button>
+                <button class="btn" style="flex:1; background:var(--acc); color:#000;" onclick="window.ws.authGPS()">UNLOCK</button>
             </div>
         </div>
     </div>
@@ -1208,6 +1283,11 @@ const htmlContent = `
             this.send({type:'auth_tune', password:p, freq:Math.floor(f*1e6), mode:m, title:t});
             state.mode = m;
         },
+        authGPS() {
+            const p = document.getElementById('inpGPSPass').value;
+            this.send({type:'auth_gps', gpsPassword:p});
+            window.ui.closeModal();
+        },
         saveBookmark() {
             const title = document.getElementById('addName').value;
             if (!title) return;
@@ -1281,15 +1361,6 @@ const htmlContent = `
         init() {
             if (window.ws) { window.ws.connect(); } 
             
-            // Map Init
-            if (document.getElementById('map')) {
-                map = L.map('map').setView([35.6895, 139.6917], 13); // Default Tokyo
-                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                    attribution: '&copy; OSM'
-                }).addTo(map);
-                marker = L.marker([35.6895, 139.6917]).addTo(map);
-            }
-
             if ('mediaSession' in navigator) {
                 const ms = navigator.mediaSession;
                 ms.setActionHandler('play', () => this.togAudio());
@@ -1303,6 +1374,19 @@ const htmlContent = `
                     const newFreq = state.freq + 100000;
                     window.ws.tuneDir(newFreq / 1e6, state.mode);
                 });
+            }
+        },
+
+        initMap() {
+            if (!map && document.getElementById('map')) {
+                map = L.map('map').setView([35.6895, 139.6917], 13);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    attribution: '&copy; OSM'
+                }).addTo(map);
+                marker = L.marker([35.6895, 139.6917]).addTo(map);
+                
+                // Fix map render issue when hidden initially
+                setTimeout(() => map.invalidateSize(), 100);
             }
         },
 
@@ -1391,18 +1475,38 @@ const htmlContent = `
                 document.getElementById('bdgConn').innerText = '👤 ' + m.connections;
             }
 
-            // Map Update Logic
-            const mapMsg = document.getElementById('mapMsg');
-            if (m.gpsStatus === 'active' && m.lat && m.lon && m.lat !== 0 && m.lon !== 0) {
-                mapMsg.style.display = 'none';
-                if (marker) marker.setLatLng([m.lat, m.lon]);
-                if (map) map.setView([m.lat, m.lon]);
-            } else if (m.gpsStatus === 'searching') {
-                mapMsg.style.display = 'flex';
-                mapMsg.innerText = '📡 GPS信号を受信中...';
-            } else if (m.gpsStatus === 'disconnected') {
-                mapMsg.style.display = 'flex';
-                mapMsg.innerText = '⚠️ GPSモジュール未接続';
+            // GPS Logic
+            const btnGPS = document.getElementById('btnGPSAuth');
+            const mapContainer = document.getElementById('mapContainer');
+            const addrDisp = document.getElementById('dspAddr');
+
+            if (m.gpsUnlocked) {
+                btnGPS.innerText = "LOCK MAP & GPS";
+                btnGPS.classList.add('active');
+                mapContainer.style.display = 'block';
+                addrDisp.innerText = m.address || '';
+                
+                // Initialize map once visible
+                if (!map) window.ui.initMap();
+
+                const mapMsg = document.getElementById('mapMsg');
+                if (m.gpsStatus === 'active' && m.lat && m.lon && m.lat !== 0 && m.lon !== 0) {
+                    mapMsg.style.display = 'none';
+                    if (marker) marker.setLatLng([m.lat, m.lon]);
+                    if (map) map.setView([m.lat, m.lon]);
+                } else if (m.gpsStatus === 'searching') {
+                    mapMsg.style.display = 'flex';
+                    mapMsg.innerText = '📡 GPS信号を受信中...';
+                } else if (m.gpsStatus === 'disconnected') {
+                    mapMsg.style.display = 'flex';
+                    mapMsg.innerText = '⚠️ GPSモジュール未接続';
+                }
+            } else {
+                // Locked
+                btnGPS.innerText = "UNLOCK MAP & GPS";
+                btnGPS.classList.remove('active');
+                mapContainer.style.display = 'none';
+                addrDisp.innerText = '';
             }
             
             ['off','weak','mid','strong'].forEach(k => { 
@@ -1447,6 +1551,9 @@ const htmlContent = `
                 document.getElementById('inpFreq').value = (state.freq/1e6).toFixed(3); 
                 this.selMod(state.mode); 
                 document.getElementById('inpPass').focus();
+            } else if (type === 'auth_gps') {
+                document.getElementById('modalGPSAuth').style.display = 'flex';
+                document.getElementById('inpGPSPass').focus();
             } else if (type === 'add_folder' || type === 'add_freq') {
                 document.getElementById('modalAdd').style.display = 'flex';
                 this.targetParent = id; 
@@ -1509,6 +1616,7 @@ const htmlContent = `
             document.getElementById('modalTune').style.display = 'none';
             document.getElementById('modalAdd').style.display = 'none';
             document.getElementById('modalMove').style.display = 'none';
+            document.getElementById('modalGPSAuth').style.display = 'none';
         },
         selMod(m) {
             this.modalMode = m;
