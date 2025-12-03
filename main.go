@@ -1786,7 +1786,7 @@ const htmlContent = `
                 '<div class="row">' +
                     '<div class="row-click-area">' +
                         '<div class="txt">' +
-                            '<span style="font-weight:600;">'+(f.name.split('_')[2]||f.name)+'</span>' +
+                            '<span style="font-weight:600; font-size:0.85rem; word-break:break-all;">'+f.name+'</span>' +
                             '<span class="sub">'+(f.size/1024/1024).toFixed(2)+' MB</span>' +
                         '</div>' +
                     '</div>' +
