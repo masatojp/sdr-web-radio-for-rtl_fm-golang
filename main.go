@@ -1745,6 +1745,7 @@ const htmlContent = `
     window.ws = {
         c: null,
         bytesReceived: 0,
+        bytesSent: 0,
         lastSpeedUpdate: 0,
         connect() {
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1766,7 +1767,13 @@ const htmlContent = `
             };
             this.c.onclose = () => setTimeout(()=>this.connect(), 3000);
         },
-        send(o) { if(this.c&&this.c.readyState===1) this.c.send(JSON.stringify(o)); },
+        send(o) { 
+            if(this.c&&this.c.readyState===1) {
+                const s = JSON.stringify(o);
+                this.bytesSent += s.length;
+                this.c.send(s);
+            }
+        },
         sendSq(v) { this.send({type:'set_squelch', val:parseInt(v)}); },
         setMode(m) { state.mode=m; this.tune(true); },
         setAtt(a) { window.ui.stopAudioPipeline(); this.send({type:'set_att', att:a}); },
@@ -1848,18 +1855,23 @@ const htmlContent = `
             document.getElementById('inpDeletePass').value = ''; // clear
         },
         audio(b) {
-            if(!audioCtx || audioCtx.state !== 'running') return;
-
             // Speed Calculation
             this.bytesReceived += b.byteLength;
             const nowTime = Date.now();
             if (nowTime - this.lastSpeedUpdate >= 1000) {
-                const mbps = (this.bytesReceived * 8 / 1000000).toFixed(2);
+                const rxMbps = (this.bytesReceived * 8 / 1000000).toFixed(2);
+                const txMbps = (this.bytesSent * 8 / 1000000).toFixed(2);
                 const el = document.getElementById('dbgSpeed');
-                if(el) el.innerHTML = mbps + '<br><span style="font-size:0.7em; font-weight:normal; color:#aaa">Mbps</span>';
+                if(el) el.innerHTML = '<div style="display:flex; flex-direction:column; align-items:center; line-height:1.1">' +
+                    '<span>RX: ' + rxMbps + ' <span style="font-size:0.7em; color:#aaa">Mbps</span></span>' +
+                    '<span>TX: ' + txMbps + ' <span style="font-size:0.7em; color:#aaa">Mbps</span></span>' +
+                    '</div>';
                 this.bytesReceived = 0;
+                this.bytesSent = 0;
                 this.lastSpeedUpdate = nowTime;
             }
+
+            if(!audioCtx || audioCtx.state !== 'running') return;
 
             // Resume audio bridge if it was auto-paused
             // Resume audio bridge if it was auto-paused
