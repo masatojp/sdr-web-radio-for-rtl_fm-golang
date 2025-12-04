@@ -1721,6 +1721,7 @@ const htmlContent = `
     const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false, moveTargetId: null, gpsUnlocked: false, deleteTarget: null };
     let nextStartTime = 0; 
     let keepAliveOsc = null; // iOS keep-alive oscillator
+    let dummyNode = null; // Silent Audio Hack Node
 
     // WebSocket Definition
     window.ws = {
@@ -1852,15 +1853,15 @@ const htmlContent = `
 
             const now = audioCtx.currentTime;
             
-            // iOS Background Fix: Increased latency safety margin to prevent stuttering/looping
-            // Background: 0.50s (more robust against throttling), Foreground: 0.10s
-            const latency = document.hidden ? 0.50 : 0.10;
+            // iOS Background Fix:
+            // "Silent Audio Hack" (dummyNode) keeps audioCtx running, so we just need buffer management.
+            // When in background, we allow a LARGER latency buffer (1.0s) to absorb jitter.
+            const latency = document.hidden ? 1.0 : 0.10;
             
-            // Relaxed drift tolerance to prevent frequent resets (must be significantly > latency)
-            const driftTolerance = document.hidden ? 3.0 : 0.5;
-
-            // Reset timing if we drifted too far or fell behind
-            if (nextStartTime < now || nextStartTime > now + driftTolerance) {
+            // If nextStartTime is in the past (underrun), jump ahead.
+            // If nextStartTime is too far in future (overrun), jump back.
+            // Using a loose tolerance in background prevents skipping.
+            if (nextStartTime < now || nextStartTime > now + (document.hidden ? 5.0 : 0.5)) {
                 nextStartTime = now + latency;
             }
 
@@ -1896,14 +1897,15 @@ const htmlContent = `
                 setTimeout(() => map.invalidateSize(), 100);
             }
             
-            // Reset audio timing when switching visibility to prevent stutter
+            // Reset audio timing when switching visibility
             document.addEventListener('visibilitychange', () => {
                 if (audioCtx && audioCtx.state === 'running') {
+                     // Force re-sync on visibility change
                      nextStartTime = 0; 
                 }
             });
             
-            // iOS Fix: Ensure AudioContext resumes on touch (not just click)
+            // iOS Fix: Ensure AudioContext resumes on touch
             document.body.addEventListener('touchstart', () => {
                 if (audioCtx && audioCtx.state !== 'running') audioCtx.resume();
             }, {passive: true});
@@ -1940,10 +1942,10 @@ const htmlContent = `
             const btn = document.getElementById('btnAudio');
             if (!audioCtx) {
                 const Ctx = window.AudioContext || window.webkitAudioContext;
-                // Fix sample rate to 48000 to match server and prevent resampling artifacts
+                // Fix sample rate to 48000 to match server
                 audioCtx = new Ctx({ latencyHint: 'playback', sampleRate: 48000 }); 
                 
-                // Auto-resume if interrupted by system sounds/calls
+                // Auto-resume if interrupted
                 audioCtx.onstatechange = () => {
                     if (audioCtx.state === 'interrupted') {
                         audioCtx.resume();
@@ -1956,32 +1958,26 @@ const htmlContent = `
                 audioEl.srcObject = dest.stream;
                 window.audioDest = dest;
 
-                // 1. Play audio element to start session
                 try {
                     await audioEl.play();
                 } catch(e) { console.warn('Audio play failed', e); }
 
-                // 2. Setup Keep-Alive Oscillator (Direct to Destination)
-                // This forces the AudioContext to stay active even if no data is coming from WS
-                const osc = audioCtx.createOscillator();
-                const g = audioCtx.createGain();
-                osc.connect(g); 
-                g.connect(audioCtx.destination); // Direct hardware connection
-                osc.frequency.value = 20; 
-                g.gain.value = 0.0001; // Tiny non-zero gain
-                osc.start();
-                keepAliveOsc = osc;
+                // --- SILENT AUDIO HACK FOR iOS ---
+                // Keep the audio context active even when no data is arriving
+                // using a ScriptProcessorNode (deprecated but effective on iOS)
+                // This forces the audio thread to stay alive.
+                if (!dummyNode) {
+                    dummyNode = audioCtx.createScriptProcessor(4096, 1, 1);
+                    dummyNode.onaudioprocess = (e) => {
+                        // Just generate silence, or very faint noise to be sure
+                        const output = e.outputBuffer.getChannelData(0);
+                        for (let i = 0; i < output.length; i++) {
+                            output[i] = (Math.random() * 0.000001); // Tiny noise
+                        }
+                    };
+                    dummyNode.connect(audioCtx.destination);
+                }
 
-                // 3. Setup Dummy stream for <audio> tag input
-                // Ensures the stream for the audio tag is never "empty"
-                const osc2 = audioCtx.createOscillator();
-                const g2 = audioCtx.createGain();
-                osc2.connect(g2);
-                g2.connect(dest);
-                osc2.frequency.value = 20;
-                g2.gain.value = 0.0001;
-                osc2.start();
-                
                 this.updateBtnState('running');
                 this.updateMediaMetadata();
                 return;
