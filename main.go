@@ -1747,6 +1747,7 @@ const htmlContent = `
     // WebSocket Definition
     window.ws = {
         c: null,
+        watchdog: null,
         connect() {
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
             this.c = new WebSocket(proto + '//' + location.host + '/ws');
@@ -1851,11 +1852,16 @@ const htmlContent = `
         audio(b) {
             if(!audioCtx || audioCtx.state !== 'running') return;
 
-            // Resume audio bridge if it was paused for tuning
-            if (state.audioPausedForTune) {
+            // Watchdog: Clear previous timer
+            if (this.watchdog) clearTimeout(this.watchdog);
+            // Set new timer: if no data for 500ms, stop pipeline
+            this.watchdog = setTimeout(() => window.ui.stopAudioPipeline(), 500);
+
+            // Resume audio bridge if it was auto-paused
+            if (state.autoPaused) {
                 const el = document.getElementById('audioBridge');
                 if (el) el.play().catch(e=>{});
-                state.audioPausedForTune = false;
+                state.autoPaused = false;
                 nextStartTime = 0; // Force reset
             }
 
@@ -1979,12 +1985,12 @@ const htmlContent = `
         },
 
         stopAudioPipeline() {
-            // Called when tuning to prevent looping of last buffer on iOS
+            // Called when tuning or signal lost to prevent looping
             if (audioCtx && audioCtx.state === 'running') {
                 const el = document.getElementById('audioBridge');
                 if (el) {
                     el.pause();
-                    state.audioPausedForTune = true;
+                    state.autoPaused = true;
                 }
             }
         },
