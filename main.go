@@ -174,18 +174,25 @@ type ProcessResult struct {
 	IsOpen bool
 }
 
+// Process handles audio DSP.
+// Optimized: Removed binary.Read reflection inside the loop for performance.
 func (d *AudioDSP) Process(input []byte, threshold int) ProcessResult {
+	// input is raw 16-bit LE PCM
 	numSamples := len(input) / 2
 	outBuf := new(bytes.Buffer)
+	// Pre-allocate buffer to avoid reallocation (approx same size)
+	outBuf.Grow(len(input))
 
 	sqThresh := float64(threshold) / 100.0
 	var sumSq float64 = 0
 
-	reader := bytes.NewReader(input)
+	// Pre-calculate constants outside loop
+	const maxGain = 20.0
+	const minGain = 0.1
 
 	for i := 0; i < numSamples; i++ {
-		var rawInt int16
-		binary.Read(reader, binary.LittleEndian, &rawInt)
+		// Optimized: Direct little-endian conversion
+		rawInt := int16(binary.LittleEndian.Uint16(input[i*2 : i*2+2]))
 
 		s := float64(rawInt) / 32768.0
 
@@ -198,11 +205,11 @@ func (d *AudioDSP) Process(input []byte, threshold int) ProcessResult {
 		// AGC
 		d.agcPeak = 0.999*d.agcPeak + 0.001*math.Abs(s)
 		g := 0.5 / (d.agcPeak + 0.01)
-		if g > 20.0 {
-			g = 20.0
+		if g > maxGain {
+			g = maxGain
 		}
-		if g < 0.1 {
-			g = 0.1
+		if g < minGain {
+			g = minGain
 		}
 		d.agcGain = 0.995*d.agcGain + 0.005*g
 
@@ -218,14 +225,15 @@ func (d *AudioDSP) Process(input []byte, threshold int) ProcessResult {
 				p = p - (p*p*p)/27
 			}
 		}
+		// Hard limit clamp
 		if p > 0.99 {
 			p = 0.99
-		}
-		if p < -0.99 {
+		} else if p < -0.99 {
 			p = -0.99
 		}
 
 		outInt := int16(p * 32767)
+		// Optimized: Write directly to buffer
 		binary.Write(outBuf, binary.LittleEndian, outInt)
 
 		sumSq += s * s
@@ -243,6 +251,7 @@ func (d *AudioDSP) Process(input []byte, threshold int) ProcessResult {
 		d.squelchGate = 0.0
 	}
 
+	// Calculate RSSI visualization (0-100 range mostly)
 	rssi := int16(math.Min(100, math.Floor(math.Sqrt(d.rms)*500)))
 
 	return ProcessResult{
@@ -256,11 +265,10 @@ func (d *AudioDSP) Process(input []byte, threshold int) ProcessResult {
 // 4. システム & グローバル変数
 // ==========================================
 
-// SafeClient wraps websocket connection with a mutex to prevent concurrent writes
 type SafeClient struct {
 	Conn      *websocket.Conn
 	mu        sync.Mutex
-	DebugAuth bool // デバッグ情報閲覧権限
+	DebugAuth bool
 }
 
 func (c *SafeClient) WriteMessage(messageType int, data []byte) error {
@@ -291,15 +299,15 @@ var (
 		Lon:         0.0,
 		Address:     "",
 		GPSStatus:   "init",
-		GPSUnlocked: false, // Default Locked
+		GPSUnlocked: false,
 	}
 	bookmarks []Bookmark
 	bmMu      sync.Mutex
 	squelchDB = make(map[string]int)
 
 	clients   = make(map[*SafeClient]bool)
-	broadcast = make(chan []byte)
-	statusMsg = make(chan []byte)
+	broadcast = make(chan []byte, 256) // Buffered to prevent blocking SDR loop
+	statusMsg = make(chan []byte, 10)
 	clientsMu sync.Mutex
 
 	cmdChan = make(chan bool)
@@ -322,7 +330,12 @@ func sendDiscordNotification() {
 		return
 	}
 
-	freqStr := fmt.Sprintf("%.3f MHz", float64(state.Freq)/1e6)
+	state.mu.Lock()
+	freqVal := state.Freq
+	modeVal := state.Mode
+	state.mu.Unlock()
+
+	freqStr := fmt.Sprintf("%.3f MHz", float64(freqVal)/1e6)
 
 	payload := DiscordPayload{
 		Username: "SDR Commander",
@@ -334,14 +347,16 @@ func sendDiscordNotification() {
 				Timestamp:   time.Now().Format(time.RFC3339),
 				Fields: []DiscordEmbedField{
 					{Name: "Initial Freq", Value: freqStr, Inline: true},
-					{Name: "Mode", Value: state.Mode, Inline: true},
+					{Name: "Mode", Value: modeVal, Inline: true},
 				},
 			},
 		},
 	}
 
 	jsonData, _ := json.Marshal(payload)
-	resp, err := http.Post(webhookURL, "application/json", bytes.NewBuffer(jsonData))
+	// Fire and forget, don't block too long
+	client := http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(webhookURL, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		log.Println("Discord Notification Failed:", err)
 		return
@@ -353,17 +368,13 @@ func sendDiscordNotification() {
 // 6. SDR & GPS Manager
 // ==========================================
 
-// Reverse Geocoding via Nominatim
 func reverseGeocode(lat, lon float64) string {
 	url := fmt.Sprintf("https://nominatim.openstreetmap.org/reverse?format=json&lat=%f&lon=%f", lat, lon)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return ""
 	}
-
-	// Nominatim requires User-Agent
 	req.Header.Set("User-Agent", "SDR-Commander-Go/1.0")
-
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -379,7 +390,6 @@ func reverseGeocode(lat, lon float64) string {
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return ""
 	}
-
 	return data.DisplayName
 }
 
@@ -410,21 +420,15 @@ func gpsManager() {
 	if gpsPort == "" {
 		gpsPort = "/dev/ttyUSB0"
 	}
-
 	gpsBaud := os.Getenv("GPS_BAUD_RATE")
 	if gpsBaud == "" {
 		gpsBaud = "38400"
 	}
-
-	// Track the last update time
 	var lastUpdate time.Time
 
 	for {
-		// Configure serial port using stty (Linux/RPi specific)
-		exec.Command("stty", "-F", gpsPort, gpsBaud, "raw", "-echo").Run()
-
-		f, err := os.Open(gpsPort)
-		if err != nil {
+		// Only run if port exists to avoid log spam/cpu usage
+		if _, err := os.Stat(gpsPort); os.IsNotExist(err) {
 			state.mu.Lock()
 			if state.GPSStatus != "disconnected" {
 				state.GPSStatus = "disconnected"
@@ -433,6 +437,13 @@ func gpsManager() {
 			} else {
 				state.mu.Unlock()
 			}
+			time.Sleep(10 * time.Second)
+			continue
+		}
+
+		exec.Command("stty", "-F", gpsPort, gpsBaud, "raw", "-echo").Run()
+		f, err := os.Open(gpsPort)
+		if err != nil {
 			time.Sleep(5 * time.Second)
 			continue
 		}
@@ -450,17 +461,15 @@ func gpsManager() {
 		for scanner.Scan() {
 			line := scanner.Text()
 
-			// 1. アクティブユーザー確認 (Check for active listeners)
 			clientsMu.Lock()
 			hasListeners := len(clients) > 0
 			clientsMu.Unlock()
 
-			// ユーザーがいなければ処理をスキップ（読み捨て）
 			if !hasListeners {
+				// Prevent buffer buildup if no listeners, but read periodically to flush
 				continue
 			}
 
-			// 2. 15秒間隔チェック (Check 15s interval)
 			if time.Since(lastUpdate) < 15*time.Second {
 				continue
 			}
@@ -471,8 +480,6 @@ func gpsManager() {
 					if parts[6] != "0" && len(parts[2]) > 0 && len(parts[4]) > 0 {
 						lat := parseNMEACoord(parts[2], parts[3])
 						lon := parseNMEACoord(parts[4], parts[5])
-
-						// Update timestamp immediately after receiving valid data
 						lastUpdate = time.Now()
 
 						state.mu.Lock()
@@ -481,18 +488,13 @@ func gpsManager() {
 							state.GPSStatus = "active"
 							updated = true
 						}
+						// fmt.Printf("[GPS] Update - Lat: %.6f, Lon: %.6f\n", lat, lon)
 
-						// Log to Standard Output
-						fmt.Printf("[GPS] Update (15s) - Lat: %.6f, Lon: %.6f\n", lat, lon)
-
-						// Significant change check for Address Lookup
 						dist := math.Abs(state.Lat-lat) + math.Abs(state.Lon-lon)
-
 						state.Lat = lat
 						state.Lon = lon
 						updated = true
 
-						// Address Lookup - Only on significant moves to protect API quota
 						if dist > 0.0001 {
 							go func(la, lo float64) {
 								addr := reverseGeocode(la, lo)
@@ -501,12 +503,10 @@ func gpsManager() {
 									state.Address = addr
 									state.mu.Unlock()
 									broadcastStatus()
-									fmt.Printf("[GPS] Address Updated: %s\n", addr)
 								}
 							}(lat, lon)
 						}
 						state.mu.Unlock()
-
 						if updated {
 							broadcastStatus()
 						}
@@ -555,6 +555,8 @@ func sdrManager() {
 			gainVal = "0"
 		}
 
+		// -s 48000 provides 48kHz sampling rate.
+		// rtl_fm outputs signed 16-bit little endian integers.
 		args := []string{"-f", freqStr, "-g", gainVal, "-p", ppm, "-F", "9"}
 		if mode == "WFM" {
 			args = append(args, "-M", "wbfm", "-s", "240000", "-r", fmt.Sprintf("%d", SampleRate))
@@ -573,13 +575,13 @@ func sdrManager() {
 		stdout, err = cmd.StdoutPipe()
 		if err != nil {
 			log.Println("Error creating stdout pipe:", err)
-			time.Sleep(1 * time.Second)
+			time.Sleep(2 * time.Second)
 			continue
 		}
 
 		if err := cmd.Start(); err != nil {
 			log.Println("Error starting rtl_fm:", err)
-			time.Sleep(1 * time.Second)
+			time.Sleep(5 * time.Second) // Wait longer on failure
 			continue
 		}
 
@@ -593,25 +595,29 @@ func sdrManager() {
 					return
 				}
 				if n > 0 {
+					// Squelch check needs to be safe
 					state.mu.Lock()
 					sq := state.Squelch
 					state.mu.Unlock()
 
+					// Process audio chunk
 					res := dsp.Process(buf[:n], sq)
 
-					header := new(bytes.Buffer)
-					binary.Write(header, binary.LittleEndian, res.RSSI)
-					isOpenInt := int16(0)
+					// Build packet: [RSSI(2bytes) | IsOpen(2bytes) | PCM Data...]
+					packet := make([]byte, 4+len(res.Buffer))
+					binary.LittleEndian.PutUint16(packet[0:], uint16(res.RSSI))
+					isOpenInt := uint16(0)
 					if res.IsOpen {
 						isOpenInt = 1
 					}
-					binary.Write(header, binary.LittleEndian, isOpenInt)
+					binary.LittleEndian.PutUint16(packet[2:], isOpenInt)
+					copy(packet[4:], res.Buffer)
 
-					packet := append(header.Bytes(), res.Buffer...)
-
+					// Non-blocking send
 					select {
 					case broadcast <- packet:
 					default:
+						// Drop packet if channel is full (slow consumer)
 					}
 
 					recMu.Lock()
@@ -629,6 +635,7 @@ func sdrManager() {
 				cmd.Process.Kill()
 			}
 		case <-done:
+			// Process exited naturally (or crashed)
 		}
 
 		cmd.Wait()
@@ -642,14 +649,12 @@ func sdrManager() {
 
 func getSystemStats() SystemStats {
 	var s SystemStats
-
 	// 1. CPU Temp
 	if temp, err := os.ReadFile("/sys/class/thermal/thermal_zone0/temp"); err == nil {
 		if t, err := strconv.ParseFloat(strings.TrimSpace(string(temp)), 64); err == nil {
 			s.CPUTemp = t / 1000.0
 		}
 	}
-
 	// 2. Memory Info
 	if mem, err := os.ReadFile("/proc/meminfo"); err == nil {
 		lines := strings.Split(string(mem), "\n")
@@ -674,14 +679,12 @@ func getSystemStats() SystemStats {
 		s.MemTotal = total
 		s.MemUsed = total - (free + buffers + cached)
 	}
-
 	// 3. Disk Usage
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(RecordingsPath, &stat); err == nil {
 		s.DiskTotal = stat.Blocks * uint64(stat.Bsize)
 		s.DiskUsed = (stat.Blocks - stat.Bfree) * uint64(stat.Bsize)
 	}
-
 	// 4. Uptime
 	if uptime, err := os.ReadFile("/proc/uptime"); err == nil {
 		parts := strings.Fields(string(uptime))
@@ -691,7 +694,6 @@ func getSystemStats() SystemStats {
 			}
 		}
 	}
-
 	// 5. Load Average
 	if loadavg, err := os.ReadFile("/proc/loadavg"); err == nil {
 		fields := strings.Fields(string(loadavg))
@@ -701,12 +703,12 @@ func getSystemStats() SystemStats {
 			s.LoadAvg15, _ = strconv.ParseFloat(fields[2], 64)
 		}
 	}
-
 	return s
 }
 
 func debugMonitor() {
 	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
 	for range ticker.C {
 		stats := getSystemStats()
 		msg := map[string]interface{}{
@@ -726,43 +728,34 @@ func debugMonitor() {
 }
 
 // ==========================================
-// 8. Recording Logic
+// 8. Recording Logic (Fix: Deadlock Prevention)
 // ==========================================
 
 func startRecording() {
 	state.mu.Lock()
-	// Do NOT use defer state.mu.Unlock() here to prevent deadlock with broadcastStatus
 	if state.IsRecording {
 		state.mu.Unlock()
 		return
 	}
 
 	now := time.Now()
-	// Folder: YYYY-MM-DD
 	dateStr := now.Format("2006-01-02")
-	// Folder: xxx.xxxMHz
 	freqStr := fmt.Sprintf("%.3fMHz", float64(state.Freq)/1e6)
-
-	// File Prefix: YYYY-MM-DD_hh-mm-ss
 	timeStr := now.Format("2006-01-02_15-04-05")
 
-	// ブックマーク名
 	var titlePart string
 	if state.Title != "" {
-		// ファイル名に使用できない文字を置換
 		safeTitle := state.Title
 		replacer := strings.NewReplacer("/", "-", "\\", "-", ":", "-", "*", "-", "?", "-", "\"", "-", "<", "-", ">", "-", "|", "-")
 		safeTitle = replacer.Replace(safeTitle)
 		titlePart = "_" + safeTitle
 	}
 
-	// GPS情報
 	var gpsInfo string
 	if state.GPSUnlocked && (state.Lat != 0 || state.Lon != 0) {
 		gpsInfo = fmt.Sprintf("_Lat%.4f_Lon%.4f", state.Lat, state.Lon)
 	}
 
-	// Create Directory Structure: recordings/YYYY-MM-DD/xxx.xxxMHz/
 	dirPath := filepath.Join(RecordingsPath, dateStr, freqStr)
 	if err := os.MkdirAll(dirPath, 0755); err != nil {
 		log.Println("Mkdir error:", err)
@@ -770,7 +763,6 @@ func startRecording() {
 		return
 	}
 
-	// File Name: YYYY-MM-DD_hh-mm-ss_Freq_Title_GPS.wav
 	filename := fmt.Sprintf("%s_%s%s%s.wav", timeStr, freqStr, titlePart, gpsInfo)
 	path := filepath.Join(dirPath, filename)
 
@@ -788,9 +780,8 @@ func startRecording() {
 	recMu.Unlock()
 
 	state.IsRecording = true
-	state.RecFilename = path // Store full path for stopping later
-
-	state.mu.Unlock()
+	state.RecFilename = path
+	state.mu.Unlock() // !!! UNLOCK BEFORE BROADCASTING TO PREVENT DEADLOCK !!!
 
 	broadcastStatus()
 }
@@ -802,7 +793,7 @@ func stopRecording() {
 		return
 	}
 	state.IsRecording = false
-	state.mu.Unlock()
+	state.mu.Unlock() // !!! UNLOCK BEFORE BROADCASTING !!!
 
 	recMu.Lock()
 	defer recMu.Unlock()
@@ -822,20 +813,21 @@ func stopRecording() {
 }
 
 func writeWavHeader(w io.Writer, rate uint32, dataLen uint32) {
-	buf := new(bytes.Buffer)
-	buf.WriteString("RIFF")
-	binary.Write(buf, binary.LittleEndian, uint32(36+dataLen))
-	buf.WriteString("WAVEfmt ")
-	binary.Write(buf, binary.LittleEndian, uint32(16))
-	binary.Write(buf, binary.LittleEndian, uint16(1))
-	binary.Write(buf, binary.LittleEndian, uint16(1))
-	binary.Write(buf, binary.LittleEndian, rate)
-	binary.Write(buf, binary.LittleEndian, rate*2)
-	binary.Write(buf, binary.LittleEndian, uint16(2))
-	binary.Write(buf, binary.LittleEndian, uint16(16))
-	buf.WriteString("data")
-	binary.Write(buf, binary.LittleEndian, dataLen)
-	w.Write(buf.Bytes())
+	// Simple manual write is faster than reflection
+	buf := make([]byte, 44)
+	copy(buf[0:], "RIFF")
+	binary.LittleEndian.PutUint32(buf[4:], 36+dataLen)
+	copy(buf[8:], "WAVEfmt ")
+	binary.LittleEndian.PutUint32(buf[16:], 16)
+	binary.LittleEndian.PutUint16(buf[20:], 1)
+	binary.LittleEndian.PutUint16(buf[22:], 1)
+	binary.LittleEndian.PutUint32(buf[24:], rate)
+	binary.LittleEndian.PutUint32(buf[28:], rate*2)
+	binary.LittleEndian.PutUint16(buf[32:], 2)
+	binary.LittleEndian.PutUint16(buf[34:], 16)
+	copy(buf[36:], "data")
+	binary.LittleEndian.PutUint32(buf[40:], dataLen)
+	w.Write(buf)
 }
 
 // ==========================================
@@ -867,12 +859,6 @@ func loadData() {
 func saveBookmarksToFile() {
 	d, _ := json.MarshalIndent(bookmarks, "", "  ")
 	os.WriteFile(BookmarksFile, d, 0644)
-}
-
-func saveBookmarks() {
-	bmMu.Lock()
-	defer bmMu.Unlock()
-	saveBookmarksToFile()
 }
 
 func saveSquelch() {
@@ -912,25 +898,8 @@ func isDescendant(checkID, potentialAncestorID string, all []Bookmark) bool {
 
 func broadcastStatus() {
 	state.mu.Lock()
-	defer state.mu.Unlock()
-
-	clientsMu.Lock()
-	connCount := len(clients)
-	clientsMu.Unlock()
-
-	var lat, lon float64
-	var addr, gpsStatus string
-	if state.GPSUnlocked {
-		lat, lon = state.Lat, state.Lon
-		addr = state.Address
-		gpsStatus = state.GPSStatus
-	} else {
-		lat, lon = 0, 0
-		addr = ""
-		gpsStatus = "locked"
-	}
-
-	msg := map[string]interface{}{
+	// Create copy of data to unlock quickly
+	msgData := map[string]interface{}{
 		"type":        "status_update",
 		"freq":        state.Freq,
 		"mode":        state.Mode,
@@ -938,19 +907,35 @@ func broadcastStatus() {
 		"att":         state.Att,
 		"squelch":     state.Squelch,
 		"isRecording": state.IsRecording,
-		"connections": connCount,
-		"lat":         lat,
-		"lon":         lon,
-		"address":     addr,
-		"gpsStatus":   gpsStatus,
+		"lat":         state.Lat,
+		"lon":         state.Lon,
+		"address":     state.Address,
+		"gpsStatus":   state.GPSStatus,
 		"gpsUnlocked": state.GPSUnlocked,
 	}
-	bytes, _ := json.Marshal(msg)
-	statusMsg <- bytes
+	if !state.GPSUnlocked {
+		msgData["lat"] = 0
+		msgData["lon"] = 0
+		msgData["address"] = ""
+		msgData["gpsStatus"] = "locked"
+	}
+	state.mu.Unlock()
+
+	clientsMu.Lock()
+	connCount := len(clients)
+	clientsMu.Unlock()
+	msgData["connections"] = connCount
+
+	bytes, _ := json.Marshal(msgData)
+	
+	// Non-blocking send to status channel
+	select {
+	case statusMsg <- bytes:
+	default:
+	}
 }
 
 func broadcastRecordings() {
-	// Walk directories to build tree structure
 	dateMap := make(map[string]map[string][]RecFileEntry)
 
 	filepath.WalkDir(RecordingsPath, func(path string, d fs.DirEntry, err error) error {
@@ -965,21 +950,15 @@ func broadcastRecordings() {
 			var date, freq string
 
 			if len(parts) >= 3 {
-				// 既にフォルダ分けされている場合: recordings/YYYY-MM-DD/xxx.xxxMHz/file.wav
 				date = parts[0]
 				freq = parts[1]
 			} else {
-				// ルートにあるファイルなどを解析して分類
 				fname := d.Name()
-
-				// 1. 日付の特定
 				if len(fname) >= 10 && fname[4] == '-' && fname[7] == '-' {
 					date = fname[:10]
 				} else {
 					date = info.ModTime().Format("2006-01-02")
 				}
-
-				// 2. 周波数の特定
 				freq = "Unknown Freq"
 				nameParts := strings.Split(fname, "_")
 				for _, p := range nameParts {
@@ -993,31 +972,25 @@ func broadcastRecordings() {
 			if dateMap[date] == nil {
 				dateMap[date] = make(map[string][]RecFileEntry)
 			}
-
 			dateMap[date][freq] = append(dateMap[date][freq], RecFileEntry{
 				Name: d.Name(),
-				Path: rel, // 相対パス（ダウンロード・削除用）
+				Path: rel,
 				Size: info.Size(),
 			})
 		}
 		return nil
 	})
 
-	// Convert map to sorted slice for JSON
 	var dateList []RecDateEntry
 	for date, freqMap := range dateMap {
 		var freqList []RecFreqEntry
 		for freq, files := range freqMap {
-			// Sort files by name (time) asc
 			sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
 			freqList = append(freqList, RecFreqEntry{Freq: freq, Files: files})
 		}
-		// Sort freqs asc
 		sort.Slice(freqList, func(i, j int) bool { return freqList[i].Freq < freqList[j].Freq })
-
 		dateList = append(dateList, RecDateEntry{Date: date, Freqs: freqList})
 	}
-	// Sort dates desc (newest first)
 	sort.Slice(dateList, func(i, j int) bool { return dateList[i].Date > dateList[j].Date })
 
 	msg := map[string]interface{}{
@@ -1025,7 +998,10 @@ func broadcastRecordings() {
 		"data": dateList,
 	}
 	bytes, _ := json.Marshal(msg)
-	statusMsg <- bytes
+	select {
+	case statusMsg <- bytes:
+	default:
+	}
 }
 
 func handleMessages() {
@@ -1056,7 +1032,6 @@ func checkAuthHash(envKey, inputPass string) bool {
 	if targetHash == "" {
 		return false
 	}
-
 	sum := sha256.Sum256([]byte(inputPass))
 	inputHash := hex.EncodeToString(sum[:])
 	return inputHash == targetHash
@@ -1067,7 +1042,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-
 	client := &SafeClient{Conn: ws}
 
 	clientsMu.Lock()
@@ -1107,11 +1081,16 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				state.Title = cmd.Title
 				state.mu.Unlock()
 				k := fmt.Sprintf("%d", int(cmd.Freq))
+				
+				// Squelch check
+				newSq := 10 // Default
 				if v, ok := squelchDB[k]; ok {
-					state.mu.Lock()
-					state.Squelch = v
-					state.mu.Unlock()
+					newSq = v
 				}
+				state.mu.Lock()
+				state.Squelch = newSq
+				state.mu.Unlock()
+
 				go func() { cmdChan <- true }()
 				broadcastStatus()
 			}
@@ -1141,8 +1120,10 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		case "set_squelch":
 			state.mu.Lock()
 			state.Squelch = cmd.Val
+			freq := state.Freq
 			state.mu.Unlock()
-			squelchDB[fmt.Sprintf("%d", state.Freq)] = cmd.Val
+			
+			squelchDB[fmt.Sprintf("%d", freq)] = cmd.Val
 			saveSquelch()
 			broadcastStatus()
 		case "start_recording":
@@ -1154,11 +1135,15 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				client.WriteJSON(map[string]interface{}{"type": "error", "msg": "Invalid delete password"})
 				break
 			}
-			// Filename is now a relative path
-			// Prevent traversal
-			if !strings.Contains(cmd.Filename, "..") {
-				os.Remove(filepath.Join(RecordingsPath, cmd.Filename))
-				// Check if dir is empty and remove it? (Optional, skipping for safety)
+			// Security: Prevent Path Traversal
+			cleanPath := filepath.Clean(cmd.Filename)
+			if strings.Contains(cleanPath, "..") || strings.HasPrefix(cleanPath, "/") || strings.HasPrefix(cleanPath, "\\") {
+				log.Println("Security Alert: Path Traversal Attempt", cmd.Filename)
+				break
+			}
+			
+			targetPath := filepath.Join(RecordingsPath, cleanPath)
+			if err := os.Remove(targetPath); err == nil {
 				broadcastRecordings()
 			}
 
@@ -1280,7 +1265,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 // 11. PWA & Main & HTML Content
 // ==========================================
 
-// PWA: Manifest JSON
 const manifestContent = `{
   "name": "SDR COMMANDER",
   "short_name": "SDR Cmd",
@@ -1302,9 +1286,8 @@ const manifestContent = `{
   ]
 }`
 
-// PWA: Service Worker JS
 const swContent = `
-const CACHE_NAME = 'sdr-cmd-v1';
+const CACHE_NAME = 'sdr-cmd-v2';
 const ASSETS = [
   '/',
   '/manifest.json',
@@ -1316,11 +1299,15 @@ self.addEventListener('install', (e) => {
   e.waitUntil(
     caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS))
   );
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', (e) => {
+    e.waitUntil(clients.claim());
 });
 
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
-  // Do not cache API/WS calls
   if (url.pathname.startsWith('/ws') || url.pathname.startsWith('/download/')) {
     return;
   }
@@ -1330,21 +1317,16 @@ self.addEventListener('fetch', (e) => {
 });
 `
 
-// Helper to generate a dummy icon png
 func generateIcon(w http.ResponseWriter, size int) {
 	img := image.NewRGBA(image.Rect(0, 0, size, size))
-	// Black background
 	draw.Draw(img, img.Bounds(), &image.Uniform{color.RGBA{5, 5, 7, 255}}, image.Point{}, draw.Src)
-	// Green accent box in middle
 	draw.Draw(img, image.Rect(size/4, size/4, size*3/4, size*3/4), &image.Uniform{color.RGBA{0, 255, 200, 255}}, image.Point{}, draw.Src)
-
 	w.Header().Set("Content-Type", "image/png")
 	png.Encode(w, img)
 }
 
 func main() {
 	flag.Parse()
-
 	err := godotenv.Load()
 	if err != nil {
 		log.Println("Note: .env file not found, continuing without env vars")
@@ -1352,7 +1334,7 @@ func main() {
 
 	loadData()
 
-	// PWA Handlers
+	// Handlers
 	http.HandleFunc("/manifest.json", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(manifestContent))
@@ -1376,15 +1358,15 @@ func main() {
 			return
 		}
 		if len(r.URL.Path) > 10 && r.URL.Path[:10] == "/download/" {
-			// Support nested paths like /download/2023-10-27/128.000MHz/file.wav
-			relPath := r.URL.Path[10:] // strip "/download/"
-			// Check for traversal attempts
-			if strings.Contains(relPath, "..") {
+			relPath := r.URL.Path[10:]
+			// Security Fix: Path Traversal Prevention
+			cleanPath := filepath.Clean(relPath)
+			if strings.Contains(cleanPath, "..") || strings.HasPrefix(cleanPath, "/") || strings.HasPrefix(cleanPath, "\\") {
 				http.NotFound(w, r)
 				return
 			}
 
-			fpath := filepath.Join(RecordingsPath, relPath)
+			fpath := filepath.Join(RecordingsPath, cleanPath)
 			if _, err := os.Stat(fpath); err == nil {
 				w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filepath.Base(fpath)))
 				http.ServeFile(w, r, fpath)
@@ -1397,8 +1379,8 @@ func main() {
 	http.HandleFunc("/ws", wsHandler)
 
 	go sdrManager()
-	go gpsManager()   // GPS
-	go debugMonitor() // System Stats
+	go gpsManager()
+	go debugMonitor()
 	go handleMessages()
 
 	go func() {
@@ -1424,7 +1406,6 @@ const htmlContent = `
 <title>SDR COMMANDER</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@700&display=swap">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
-<!-- Leaflet CSS -->
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
 <style>
     :root { --bg: #050507; --panel: rgba(30, 30, 35, 0.7); --acc: #00ffc8; --acc-dim: rgba(0,255,200,0.15); --txt: #fff; --sub: #8b9bb4; --mute: #4a4a4a; --open: #00e676; --stop: #ff3b30; --warn: #ffcc00; }
@@ -1438,7 +1419,6 @@ const htmlContent = `
     .badge { font-size: 0.75rem; padding: 4px 10px; border-radius: 20px; background: rgba(255,255,255,0.05); color: var(--sub); border: 1px solid rgba(255,255,255,0.05); transition: 0.2s; }
     .badge-sql { background: var(--mute); color: #ccc; }
     .badge-sql.open { background: var(--open); color: #000; box-shadow: 0 0 10px var(--open); font-weight: bold; }
-    /* Debug button integrated into badges row */
     .debug-badge { cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 4px 8px; }
     .debug-badge:hover { background: rgba(255,255,255,0.1); }
     
@@ -1495,7 +1475,6 @@ const htmlContent = `
     .move-item:hover { background: rgba(255,255,255,0.1); }
     .move-item.selected { background: var(--acc-dim); border: 1px solid var(--acc); color: var(--acc); }
     
-    /* Map Styles */
     #map { width: 100%; height: 200px; border-radius: 12px; margin-top: 12px; border: 1px solid rgba(255,255,255,0.1); background: #222; }
     .leaflet-tile { filter: grayscale(100%) invert(100%) contrast(0.8); }
     .leaflet-bar a { background-color: var(--panel) !important; color: var(--txt) !important; border-bottom: 1px solid rgba(255,255,255,0.2) !important; }
@@ -1509,28 +1488,23 @@ const htmlContent = `
     }
     .btn-unlock { background: var(--acc); color:#000; font-weight:bold; padding:8px 16px; border-radius:8px; border:none; cursor:pointer; }
 
-    /* Debug Styles */
     .debug-panel { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(10,10,12,0.95); padding: 15px; border-top: 1px solid #333; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: #aaa; z-index: 2000; display: none; justify-content: space-around; flex-wrap: wrap; }
     .debug-item { text-align: center; margin: 5px; }
     .debug-val { font-size: 1.0rem; color: #fff; font-weight: bold; }
     
-    /* Version Tag */
     .ver-tag { position: absolute; top: 10px; right: 10px; font-size: 0.7rem; color: rgba(255,255,255,0.3); font-family: 'JetBrains Mono', monospace; pointer-events: none; }
 </style>
-<!-- Leaflet JS -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 </head>
 <body>
-
     <div class="app">
-        <div class="ver-tag">v2.1 (iOS Fix)</div>
+        <div class="ver-tag">v2.2 (Secure/Fix)</div>
         <div class="panel">
             <div class="badges">
                 <span class="badge" id="bdgMode">AM</span>
                 <span class="badge" id="bdgAtt" style="display:none">ATT</span>
                 <span class="badge badge-sql" id="bdgSql">MUTED</span>
                 <span class="badge" id="bdgConn">👤 0</span>
-                <!-- Debug Badge Button -->
                 <button class="badge debug-badge" onclick="window.ui.toggleDebug()" title="Debug Stats">
                     <span class="material-symbols-outlined" style="font-size: 0.9rem;">bug_report</span>
                 </button>
@@ -1555,7 +1529,6 @@ const htmlContent = `
                 </div>
             </div>
             
-            <!-- Map Container starts hidden -->
             <button id="btnGPSAuth" class="btn" style="margin-top:10px; width:100%" onclick="window.ui.modal('auth_gps')">UNLOCK MAP & GPS</button>
             
             <div class="map-container" id="mapContainer">
@@ -1564,7 +1537,6 @@ const htmlContent = `
             </div>
         </div>
 
-        <!-- Controls etc... -->
         <div class="ctrls">
             <button class="btn-audio-toggle" id="btnAudio" onclick="window.ui.togAudio()">
                 <span class="material-symbols-outlined">volume_up</span> START LISTENING
@@ -1597,35 +1569,15 @@ const htmlContent = `
         <div class="panel" id="listRec" style="padding:10px;"></div>
     </div>
 
-    <!-- Debug Panel -->
     <div id="debugPanel" class="debug-panel">
-        <div class="debug-item">
-            <div class="debug-val" id="dbgTemp">--°C</div>
-            <div>CPU TEMP</div>
-        </div>
-        <div class="debug-item">
-            <div class="debug-val" id="dbgLoad1">--</div>
-            <div>LOAD 1m</div>
-        </div>
-        <div class="debug-item">
-            <div class="debug-val" id="dbgLoad5">--</div>
-            <div>LOAD 5m</div>
-        </div>
-        <div class="debug-item">
-            <div class="debug-val" id="dbgLoad15">--</div>
-            <div>LOAD 15m</div>
-        </div>
-        <div class="debug-item">
-            <div class="debug-val" id="dbgMem">--%</div>
-            <div>MEM</div>
-        </div>
-        <div class="debug-item">
-            <div class="debug-val" id="dbgDisk">--%</div>
-            <div>DISK</div>
-        </div>
+        <div class="debug-item"><div class="debug-val" id="dbgTemp">--°C</div><div>CPU TEMP</div></div>
+        <div class="debug-item"><div class="debug-val" id="dbgLoad1">--</div><div>LOAD 1m</div></div>
+        <div class="debug-item"><div class="debug-val" id="dbgLoad5">--</div><div>LOAD 5m</div></div>
+        <div class="debug-item"><div class="debug-val" id="dbgLoad15">--</div><div>LOAD 15m</div></div>
+        <div class="debug-item"><div class="debug-val" id="dbgMem">--%</div><div>MEM</div></div>
+        <div class="debug-item"><div class="debug-val" id="dbgDisk">--%</div><div>DISK</div></div>
     </div>
 
-    <!-- Modals -->
     <div class="ovl" id="modalTune">
         <div class="card">
             <div style="color:#fff; font-weight:700; font-size:1.2rem; margin-bottom:20px;">Set Frequency</div>
@@ -1708,13 +1660,9 @@ const htmlContent = `
         </div>
     </div>
 
-    <!-- iOS Fix: Audio Bridge with NO Loop (Fix stutter) -->
     <audio id="audioBridge" autoplay playsinline x-webkit-airplay="allow" style="opacity:0; pointer-events:none; position:absolute; left:-9999px;"></audio>
 
 <script>
-    // iOS Background Fix v2.1
-    // Implements robust audio scheduling, silence injection, and aggressive wake-lock strategies.
-
     if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
             navigator.serviceWorker.register('/service-worker.js').catch(()=>{});
@@ -1727,14 +1675,11 @@ const htmlContent = `
     let schedulerTimer = null;
     let nextStartTime = 0; 
     let silenceNode = null;
-    let noiseNode = null; // Comfort noise to keep driver alive
+    let noiseNode = null;
     
-    // Config
-    const SCHEDULE_AHEAD_TIME = 0.1; // Schedule 100ms ahead
-    const LOOKAHEAD_MS = 25; // Check every 25ms
-    const IOS_BG_BUFFER = 0.5; // Extra buffer for iOS background
+    const SCHEDULE_AHEAD_TIME = 0.1;
+    const LOOKAHEAD_MS = 25;
 
-    // WebSocket Definition
     window.ws = {
         c: null,
         connect() {
@@ -1836,19 +1781,14 @@ const htmlContent = `
             if(!window.ui.state.deleteTarget) return;
             this.send({type:'delete_recording', filename:window.ui.state.deleteTarget, deletePassword:p});
             window.ui.closeModal();
-            document.getElementById('inpDeletePass').value = ''; // clear
+            document.getElementById('inpDeletePass').value = ''; 
         },
-        
-        // --- NEW AUDIO PIPELINE ---
         queueAudio(b) {
             if(!audioCtx || !isPlaying) return;
-            
-            // Extract Signal Info
             const dv = new DataView(b);
             const rssi = dv.getInt16(0, true);
             const sqlOpen = dv.getInt16(2, true);
             
-            // Update UI immediately (visuals don't need audio sync)
             requestAnimationFrame(() => {
                 const bar = document.getElementById('dspRssi');
                 if(bar) {
@@ -1862,7 +1802,6 @@ const htmlContent = `
                 }
             });
 
-            // Decode PCM
             const f = new Float32Array((b.byteLength - 4) / 2);
             const s16 = new Int16Array(b, 4);
             for(let i=0; i<f.length; i++) f[i] = s16[i]/32768.0;
@@ -1871,45 +1810,28 @@ const htmlContent = `
         }
     };
 
-    // --- ROBUST AUDIO SCHEDULER ---
     function audioScheduler() {
         if (!audioCtx || !isPlaying) return;
-
         const currentTime = audioCtx.currentTime;
-        
-        // Logic: If nextStartTime is behind currentTime, we are underrunning (stutter risk).
-        // On iOS background, this happens often. We MUST jump ahead.
-        // If we are way behind (>0.5s), reset the clock entirely.
         if (nextStartTime < currentTime) {
-            nextStartTime = currentTime + 0.01; // Catch up
+            nextStartTime = currentTime + 0.01;
         }
-
-        // Schedule chunks until we are sufficiently ahead
         while (audioQueue.length > 0 && nextStartTime < currentTime + SCHEDULE_AHEAD_TIME) {
             const pcm = audioQueue.shift();
             const buf = audioCtx.createBuffer(1, pcm.length, 48000);
             buf.getChannelData(0).set(pcm);
-            
             const src = audioCtx.createBufferSource();
             src.buffer = buf;
-            
-            // Always route to MediaStreamDestination for iOS background support
             if (window.audioDest) {
                 src.connect(window.audioDest);
             } else {
                 src.connect(audioCtx.destination);
             }
-            
             src.start(nextStartTime);
             nextStartTime += buf.duration;
         }
-        
-        // --- SILENCE INJECTION (Anti-Loop) ---
-        // If the queue is empty but we are running out of scheduled audio,
-        // the hardware driver might loop the last buffer.
-        // We preemptively schedule a silent buffer to keep the driver fed.
         if (audioQueue.length === 0 && nextStartTime < currentTime + 0.2) {
-             const silentBuf = audioCtx.createBuffer(1, 1024, 48000); // Small silent chunk
+             const silentBuf = audioCtx.createBuffer(1, 1024, 48000);
              const silentSrc = audioCtx.createBufferSource();
              silentSrc.buffer = silentBuf;
              if (window.audioDest) silentSrc.connect(window.audioDest);
@@ -1919,7 +1841,6 @@ const htmlContent = `
         }
     }
 
-    // UI Definition
     window.ui = {
         state: { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false, moveTargetId: null, gpsUnlocked: false, deleteTarget: null },
         modalMode: 'AM',
@@ -1930,7 +1851,6 @@ const htmlContent = `
         init() {
             if (window.ws) { window.ws.connect(); } 
             
-            // Map Init
             if (document.getElementById('map')) {
                 map = L.map('map').setView([35.6895, 139.6917], 13);
                 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -1940,15 +1860,12 @@ const htmlContent = `
                 setTimeout(() => map.invalidateSize(), 100);
             }
             
-            // Visibility Handler: Force resume
             document.addEventListener('visibilitychange', () => {
                 if (document.visibilityState === 'visible') {
-                    // Sync up when returning
                     if(audioCtx) nextStartTime = audioCtx.currentTime + 0.1;
                 }
             });
             
-            // Media Session
             if ('mediaSession' in navigator) {
                 const ms = navigator.mediaSession;
                 ms.setActionHandler('play', () => this.togAudio());
@@ -1957,49 +1874,38 @@ const htmlContent = `
             }
         },
 
-        // --- CORE AUDIO STARTUP ---
         async togAudio() {
             const btn = document.getElementById('btnAudio');
             
             if (!audioCtx) {
-                // 1. Create Context
                 const Ctx = window.AudioContext || window.webkitAudioContext;
                 audioCtx = new Ctx({ latencyHint: 'playback', sampleRate: 48000 });
                 
-                // 2. Setup Destination for <audio> tag (The Bridge)
                 const dest = audioCtx.createMediaStreamDestination();
                 window.audioDest = dest;
                 
                 const audioEl = document.getElementById('audioBridge');
                 audioEl.srcObject = dest.stream;
                 
-                // 3. Setup Comfort Noise (Anti-suspend)
-                // This plays faint noise continuously to prevent the OS from killing the audio thread
                 noiseNode = audioCtx.createBufferSource();
                 const noiseBuf = audioCtx.createBuffer(1, 48000, 48000);
                 const noiseData = noiseBuf.getChannelData(0);
-                for (let i = 0; i < 48000; i++) noiseData[i] = (Math.random() - 0.5) * 0.002; // Very quiet
+                for (let i = 0; i < 48000; i++) noiseData[i] = (Math.random() - 0.5) * 0.002;
                 noiseNode.buffer = noiseBuf;
                 noiseNode.loop = true;
-                noiseNode.connect(dest); // Connect to output
+                noiseNode.connect(dest);
                 noiseNode.start(0);
 
-                // 4. Force iOS to unlock audio by playing a buffer right now (inside click event)
                 const unlockBuf = audioCtx.createBuffer(1, 1, 48000);
                 const unlockSrc = audioCtx.createBufferSource();
                 unlockSrc.buffer = unlockBuf;
                 unlockSrc.connect(dest);
                 unlockSrc.start(0);
 
-                // 5. Start the <audio> tag
                 try {
                     await audioEl.play();
                 } catch(e) { console.error("Audio tag play failed", e); }
 
-                // 6. Start Scheduler Loop
-                // Using setInterval is usually bad for audio, but strictly necessary for 
-                // Web Audio API on iOS background if not using AudioWorklet (which needs external file).
-                // The ScriptProcessor hack is another way, but we use interval + buffer queue here.
                 if (schedulerTimer) clearInterval(schedulerTimer);
                 schedulerTimer = setInterval(audioScheduler, LOOKAHEAD_MS);
                 
@@ -2010,20 +1916,17 @@ const htmlContent = `
             }
 
             if (isPlaying) {
-                // Stop
                 await audioCtx.suspend();
                 document.getElementById('audioBridge').pause();
                 isPlaying = false;
-                if(noiseNode) { try{noiseNode.stop();}catch(e){} noiseNode=null; } // Stop noise
+                if(noiseNode) { try{noiseNode.stop();}catch(e){} noiseNode=null; }
                 if(schedulerTimer) clearInterval(schedulerTimer);
                 this.updateBtnState('suspended');
                 if('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
             } else {
-                // Resume
                 await audioCtx.resume();
                 document.getElementById('audioBridge').play();
                 
-                // Restart noise if missing
                 if(!noiseNode) {
                     noiseNode = audioCtx.createBufferSource();
                     const noiseBuf = audioCtx.createBuffer(1, 48000, 48000);
@@ -2090,7 +1993,6 @@ const htmlContent = `
                 document.getElementById('bdgConn').innerText = '👤 ' + m.connections;
             }
 
-            // GPS Logic
             const btnGPS = document.getElementById('btnGPSAuth');
             const mapContainer = document.getElementById('mapContainer');
             const addrDisp = document.getElementById('dspAddr');
@@ -2371,7 +2273,7 @@ const htmlContent = `
             if (this.state.recData) this.renderRec(this.state.recData);
         },
         renderRec(list) {
-            this.state.recData = list; // Store for re-rendering
+            this.state.recData = list; 
             let html = '';
             list.forEach(dateGroup => {
                 const dateId = 'date_' + dateGroup.date;
@@ -2392,7 +2294,7 @@ const htmlContent = `
                                   '<div onclick="window.ui.togFreq(\'' + dateGroup.date + '\', \'' + freqGroup.freq + '\')" style="padding:8px 0; font-size:0.9rem; color:var(--acc); font-weight:bold; cursor:pointer; display:flex; align-items:center;">' + 
                                   '<span class="material-symbols-outlined icon '+(isFreqOpen?'rot':'')+'" style="font-size:1rem; margin-right:5px;">chevron_right</span>' +
                                   freqGroup.freq + '</div>';
-                          
+                           
                           if (isFreqOpen) {
                               freqGroup.files.forEach(f => {
                                   html += '<div class="row" style="margin-bottom:2px;">' +
@@ -2404,7 +2306,7 @@ const htmlContent = `
                                               '</div>' +
                                               '<div class="act">' +
                                                   '<a href="/download/'+f.path+'" class="ib" download><span class="material-symbols-outlined">download</span></a>' +
-                                                  '<button class="ib ib-del" onclick="window.ws.delRec(\''+f.path+'\')"><span class="material-symbols-outlined">delete</span></button>' +
+                                                  '<button class="ib ib-del" onclick="window.ui.delRec(\''+f.path+'\')"><span class="material-symbols-outlined">delete</span></button>' +
                                               '</div>' +
                                           '</div>';
                               });
@@ -2416,12 +2318,6 @@ const htmlContent = `
             document.getElementById('listRec').innerHTML = html;
         }
     };
-
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', () => window.ui.init());
-    } else {
-        window.ui.init();
-    }
 </script>
 </body>
 </html>
