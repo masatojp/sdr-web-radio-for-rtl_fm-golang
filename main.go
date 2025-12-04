@@ -1836,7 +1836,7 @@ const htmlContent = `
                         console.log('Wake Lock released');
                     });
                 } catch (err) {
-                    console.error(`${err.name}, ${err.message}`);
+                    console.error(err.name + ", " + err.message); // FIXED: Removed backticks inside backticks
                 }
             }
         },
