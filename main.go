@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"math"
 	"net/http"
@@ -92,11 +93,26 @@ type WSCommand struct {
 	Title         string          `json:"title,omitempty"`
 	Att           string          `json:"att,omitempty"`
 	Val           int             `json:"val,omitempty"`
-	Filename      string          `json:"filename,omitempty"`
+	Filename      string          `json:"filename,omitempty"` // 削除時はパスとして使用
 	Data          json.RawMessage `json:"data,omitempty"`
 	ID            string          `json:"id,omitempty"`
 	Dir           string          `json:"dir,omitempty"`
 	NewParentID   string          `json:"newParentId,omitempty"`
+}
+
+// Recording Structures for Nested Display
+type RecFileEntry struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+	Size int64  `json:"size"`
+}
+type RecFreqEntry struct {
+	Freq  string         `json:"freq"`
+	Files []RecFileEntry `json:"files"`
+}
+type RecDateEntry struct {
+	Date  string         `json:"date"`
+	Freqs []RecFreqEntry `json:"freqs"`
 }
 
 // Nominatim Response
@@ -588,7 +604,7 @@ func sdrManager() {
 }
 
 // ==========================================
-// 7. System Stats (New)
+// 7. System Stats
 // ==========================================
 
 func getSystemStats() SystemStats {
@@ -688,35 +704,41 @@ func startRecording() {
 		return
 	}
 
-	// 1. 日時: YYYY-MM-DD_hhmmss
-	ts := time.Now().Format("2006-01-02_150405")
-	
-	// 2. 周波数: xxx.xxxMHz
+	now := time.Now()
+	// Folder: YYYY-MM-DD
+	dateStr := now.Format("2006-01-02")
+	// Folder: xxx.xxxMHz
 	freqStr := fmt.Sprintf("%.3fMHz", float64(state.Freq)/1e6)
+	
+	// File: hhmmss
+	timeStr := now.Format("150405")
 
-	// 3. ブックマーク名（タイトル）がある場合
+	// ブックマーク名
 	var titlePart string
 	if state.Title != "" {
-		// ファイル名に使用できない文字を置換
 		safeTitle := state.Title
 		replacer := strings.NewReplacer("/", "-", "\\", "-", ":", "-", "*", "-", "?", "-", "\"", "-", "<", "-", ">", "-", "|", "-")
 		safeTitle = replacer.Replace(safeTitle)
 		titlePart = "_" + safeTitle
 	}
 
-	// 4. GPS情報がある場合はファイル名に付加
+	// GPS情報
 	var gpsInfo string
 	if state.GPSUnlocked && (state.Lat != 0 || state.Lon != 0) {
 		gpsInfo = fmt.Sprintf("_Lat%.4f_Lon%.4f", state.Lat, state.Lon)
 	}
 
-	// 結合: YYYY-MM-DD_hhmmss_周波数_ブックマーク名_GPS座標.wav
-	filename := fmt.Sprintf("%s_%s%s%s.wav", ts, freqStr, titlePart, gpsInfo)
-	path := filepath.Join(RecordingsPath, filename)
-	
-	// ファイル作成などのI/O操作の前に一旦ロックを外すことも可能だが、
-	// 状態の整合性を保つため、かつファイル作成は比較的高速なためロック内で行う。
-	// ただし、エラー発生時は必ずUnlockしてリターンする必要がある。
+	// Create Directory Structure: recordings/YYYY-MM-DD/xxx.xxxMHz/
+	dirPath := filepath.Join(RecordingsPath, dateStr, freqStr)
+	if err := os.MkdirAll(dirPath, 0755); err != nil {
+		log.Println("Mkdir error:", err)
+		state.mu.Unlock()
+		return
+	}
+
+	// File Name: hhmmss_Title_GPS.wav
+	filename := fmt.Sprintf("%s%s%s.wav", timeStr, titlePart, gpsInfo)
+	path := filepath.Join(dirPath, filename)
 	
 	f, err := os.Create(path)
 	if err != nil {
@@ -732,11 +754,9 @@ func startRecording() {
 	recMu.Unlock()
 
 	state.IsRecording = true
-	state.RecFilename = filename
+	state.RecFilename = path // Store full path for stopping later
 	
-	// broadcastStatusを呼ぶ前に必ずロックを解放する
 	state.mu.Unlock()
-	
 	broadcastStatus()
 }
 
@@ -796,7 +816,6 @@ func loadData() {
 	if err == nil {
 		json.Unmarshal(bData, &bookmarks)
 	} else {
-		// Default to empty if file not found
 		bookmarks = []Bookmark{}
 		saveBookmarksToFile()
 	}
@@ -807,7 +826,6 @@ func loadData() {
 	}
 }
 
-// saveBookmarksToFile saves to file without locking (caller must hold lock)
 func saveBookmarksToFile() {
 	d, _ := json.MarshalIndent(bookmarks, "", "  ")
 	os.WriteFile(BookmarksFile, d, 0644)
@@ -856,7 +874,6 @@ func broadcastStatus() {
 	connCount := len(clients)
 	clientsMu.Unlock()
 
-	// 🔒 Security: Hide GPS info if not unlocked
 	var lat, lon float64
 	var addr, gpsStatus string
 	if state.GPSUnlocked {
@@ -864,7 +881,6 @@ func broadcastStatus() {
 		addr = state.Address
 		gpsStatus = state.GPSStatus
 	} else {
-		// Send neutral state if locked
 		lat, lon = 0, 0
 		addr = ""
 		gpsStatus = "locked" 
@@ -890,24 +906,68 @@ func broadcastStatus() {
 }
 
 func broadcastRecordings() {
-	files, _ := os.ReadDir(RecordingsPath)
-	var list []map[string]interface{}
-	for _, f := range files {
-		if filepath.Ext(f.Name()) == ".wav" {
-			info, _ := f.Info()
-			list = append(list, map[string]interface{}{
-				"name": f.Name(),
-				"size": info.Size(),
-			})
+	// Walk directories to build tree structure
+	dateMap := make(map[string]map[string][]RecFileEntry)
+
+	filepath.WalkDir(RecordingsPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil { return nil }
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".wav") {
+			// Expected path: recordings/YYYY-MM-DD/xxx.xxxMHz/file.wav
+			rel, _ := filepath.Rel(RecordingsPath, path)
+			parts := strings.Split(rel, string(os.PathSeparator))
+			
+			if len(parts) >= 3 {
+				date := parts[0]
+				freq := parts[1]
+				fname := parts[2]
+				
+				info, _ := d.Info()
+				
+				if dateMap[date] == nil {
+					dateMap[date] = make(map[string][]RecFileEntry)
+				}
+				dateMap[date][freq] = append(dateMap[date][freq], RecFileEntry{
+					Name: fname,
+					Path: rel, // Relative path for deletion/download
+					Size: info.Size(),
+				})
+			} else {
+				// Fallback for old flat files or unexpected structure
+				// Put them in "Uncategorized"
+				if dateMap["Uncategorized"] == nil {
+					dateMap["Uncategorized"] = make(map[string][]RecFileEntry)
+				}
+				info, _ := d.Info()
+				dateMap["Uncategorized"]["_"] = append(dateMap["Uncategorized"]["_"], RecFileEntry{
+					Name: d.Name(),
+					Path: d.Name(),
+					Size: info.Size(),
+				})
+			}
 		}
-	}
-	sort.Slice(list, func(i, j int) bool {
-		return list[i]["name"].(string) > list[j]["name"].(string)
+		return nil
 	})
+
+	// Convert map to sorted slice for JSON
+	var dateList []RecDateEntry
+	for date, freqMap := range dateMap {
+		var freqList []RecFreqEntry
+		for freq, files := range freqMap {
+			// Sort files by name (time) asc
+			sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
+			freqList = append(freqList, RecFreqEntry{Freq: freq, Files: files})
+		}
+		// Sort freqs asc
+		sort.Slice(freqList, func(i, j int) bool { return freqList[i].Freq < freqList[j].Freq })
+		
+		dateList = append(dateList, RecDateEntry{Date: date, Freqs: freqList})
+	}
+	// Sort dates desc (newest first)
+	sort.Slice(dateList, func(i, j int) bool { return dateList[i].Date > dateList[j].Date })
 	
 	msg := map[string]interface{}{
 		"type": "recordings",
-		"data": list,
+		"data": dateList,
 	}
 	bytes, _ := json.Marshal(msg)
 	statusMsg <- bytes
@@ -998,9 +1058,9 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		case "auth_gps":
 			if checkAuthHash("GPS_AUTH_HASH", cmd.GPSPassword) {
 				state.mu.Lock()
-				state.GPSUnlocked = !state.GPSUnlocked // Toggle Lock/Unlock
+				state.GPSUnlocked = !state.GPSUnlocked 
 				state.mu.Unlock()
-				broadcastStatus() // Updates ALL clients (Global state)
+				broadcastStatus()
 			}
 		
 		case "auth_debug":
@@ -1008,7 +1068,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				client.mu.Lock()
 				client.DebugAuth = true
 				client.mu.Unlock()
-				// Ack to client
 				client.WriteJSON(map[string]interface{}{"type": "debug_auth_success"})
 			}
 
@@ -1030,8 +1089,13 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		case "stop_recording":
 			stopRecording()
 		case "delete_recording":
-			os.Remove(filepath.Join(RecordingsPath, cmd.Filename))
-			broadcastRecordings()
+			// Filename is now a relative path
+			// Prevent traversal
+			if !strings.Contains(cmd.Filename, "..") {
+				os.Remove(filepath.Join(RecordingsPath, cmd.Filename))
+				// Check if dir is empty and remove it? (Optional, skipping for safety)
+				broadcastRecordings()
+			}
 		
 		case "add_bookmark":
             bmMu.Lock()
@@ -1149,10 +1213,17 @@ func main() {
 			return
 		}
 		if len(r.URL.Path) > 10 && r.URL.Path[:10] == "/download/" {
-			fname := filepath.Base(r.URL.Path)
-			fpath := filepath.Join(RecordingsPath, fname)
+			// Support nested paths like /download/2023-10-27/128.000MHz/file.wav
+			relPath := r.URL.Path[10:] // strip "/download/"
+			// Check for traversal attempts
+			if strings.Contains(relPath, "..") {
+				http.NotFound(w, r)
+				return
+			}
+			
+			fpath := filepath.Join(RecordingsPath, relPath)
 			if _, err := os.Stat(fpath); err == nil {
-				w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", fname))
+				w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filepath.Base(fpath)))
 				http.ServeFile(w, r, fpath)
 				return
 			}
@@ -1984,20 +2055,52 @@ const htmlContent = `
             if(state.expanded.has(id)) state.expanded.delete(id); else state.expanded.add(id);
             this.renderBM();
         },
+        togDate(date) {
+            const id = 'date_' + date;
+            if(state.expanded.has(id)) state.expanded.delete(id); else state.expanded.add(id);
+            // re-render recordings is implicitly handled by websocket updates usually, but here we might need manual trigger or just wait for next update.
+            // For simplicity, let's just re-request or rely on the fact that `renderRec` uses `state.expanded` if we pass the same data.
+            // But `renderRec` is called with data from server. We need to store that data.
+            // Let's store recData in state
+            if (state.recData) this.renderRec(state.recData);
+        },
         renderRec(list) {
-            document.getElementById('listRec').innerHTML = list.map(f => 
-                '<div class="row">' +
-                    '<div class="row-click-area">' +
-                        '<div class="txt">' +
-                            '<span style="font-weight:600; font-size:0.85rem; word-break:break-all;">'+f.name+'</span>' +
-                            '<span class="sub">'+(f.size/1024/1024).toFixed(2)+' MB</span>' +
-                        '</div>' +
-                    '</div>' +
-                    '<div class="act">' +
-                        '<a href="/download/'+f.name+'" class="ib" download><span class="material-symbols-outlined">download</span></a>' +
-                        '<button class="ib ib-del" onclick="window.ws.delRec(\''+f.name+'\')"><span class="material-symbols-outlined">delete</span></button>' +
-                    '</div>' +
-                '</div>').join('');
+            state.recData = list; // Store for re-rendering
+            let html = '';
+            list.forEach(dateGroup => {
+                const dateId = 'date_' + dateGroup.date;
+                const isOpen = state.expanded.has(dateId);
+                
+                html += '<div class="row" onclick="window.ui.togDate(\'' + dateGroup.date + '\')" style="background:rgba(255,255,255,0.08); margin-top:5px;">' +
+                        '<div class="row-click-area">' +
+                             '<span class="material-symbols-outlined icon '+(isOpen?'rot':'')+'">chevron_right</span>' +
+                             '<span style="font-weight:800; margin-left:10px;">' + dateGroup.date + '</span>' +
+                        '</div></div>';
+                
+                if (isOpen) {
+                    dateGroup.freqs.forEach(freqGroup => {
+                         html += '<div style="margin-left:15px; border-left:2px solid rgba(255,255,255,0.1); padding-left:10px;">' +
+                                 '<div style="padding:8px 0; font-size:0.9rem; color:var(--acc); font-weight:bold;">' + freqGroup.freq + '</div>';
+                         
+                         freqGroup.files.forEach(f => {
+                             html += '<div class="row" style="margin-bottom:2px;">' +
+                                    '<div class="row-click-area">' +
+                                        '<div class="txt">' +
+                                            '<span style="font-weight:600; font-size:0.85rem; word-break:break-all;">'+f.name+'</span>' +
+                                            '<span class="sub">'+(f.size/1024/1024).toFixed(2)+' MB</span>' +
+                                        '</div>' +
+                                    '</div>' +
+                                    '<div class="act">' +
+                                        '<a href="/download/'+f.path+'" class="ib" download><span class="material-symbols-outlined">download</span></a>' +
+                                        '<button class="ib ib-del" onclick="window.ws.delRec(\''+f.path+'\')"><span class="material-symbols-outlined">delete</span></button>' +
+                                    '</div>' +
+                                '</div>';
+                         });
+                         html += '</div>';
+                    });
+                }
+            });
+            document.getElementById('listRec').innerHTML = html;
         }
     };
 
