@@ -1739,7 +1739,7 @@ const htmlContent = `
                     else if(m.type==='debug_auth_success') {
                          window.ui.closeModal();
                          document.getElementById('debugPanel').style.display = 'flex';
-                    }
+                     }
                     else if(m.type==='error') alert(m.msg);
                 } else this.audio(e.data);
             };
@@ -1827,8 +1827,8 @@ const htmlContent = `
         audio(b) {
             if(!audioCtx) return;
             
-            // Resume context if suspended (common iOS issue after interruption)
-            if (audioCtx.state === 'suspended') {
+            // iOS fix: Resume if interrupted/suspended unexpectedly
+            if (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted') {
                 audioCtx.resume();
             }
 
@@ -1852,10 +1852,12 @@ const htmlContent = `
 
             const now = audioCtx.currentTime;
             
-            // Sync logic strict check: If nextStartTime is too far behind (lag/background) or too far ahead (buffer buildup)
-            // Reset to now to prevent loops/stuttering
-            if (nextStartTime < now - 0.1 || nextStartTime > now + 0.5) {
-                nextStartTime = now;
+            // iOS Background Fix: Add latency safety margin for background playback
+            const latency = document.hidden ? 0.15 : 0.02;
+
+            // Reset timing if we drifted too far or fell behind
+            if (nextStartTime < now || nextStartTime > now + 0.5) {
+                nextStartTime = now + latency;
             }
 
             const s = audioCtx.createBufferSource();
@@ -1889,6 +1891,13 @@ const htmlContent = `
                 
                 setTimeout(() => map.invalidateSize(), 100);
             }
+            
+            // Reset audio timing when switching visibility to prevent stutter
+            document.addEventListener('visibilitychange', () => {
+                if (audioCtx && audioCtx.state === 'running') {
+                     nextStartTime = 0; 
+                }
+            });
 
             if ('mediaSession' in navigator) {
                 const ms = navigator.mediaSession;
@@ -1922,7 +1931,15 @@ const htmlContent = `
             const btn = document.getElementById('btnAudio');
             if (!audioCtx) {
                 const Ctx = window.AudioContext || window.webkitAudioContext;
-                audioCtx = new Ctx({ latencyHint: 'interactive' }); 
+                // Use 'playback' latency hint for better stability in background on iOS
+                audioCtx = new Ctx({ latencyHint: 'playback' }); 
+                
+                // Auto-resume if interrupted by system sounds/calls
+                audioCtx.onstatechange = () => {
+                    if (audioCtx.state === 'interrupted') {
+                        audioCtx.resume();
+                    }
+                };
                 
                 // Destination for <audio> element
                 const dest = audioCtx.createMediaStreamDestination();
