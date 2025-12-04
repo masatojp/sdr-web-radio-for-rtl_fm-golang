@@ -1853,8 +1853,8 @@ const htmlContent = `
 
             // Watchdog: Clear previous timer
             if (this.watchdog) clearTimeout(this.watchdog);
-            // Set new timer: if no data for 500ms, stop pipeline
-            this.watchdog = setTimeout(() => window.ui.stopAudioPipeline(), 500);
+            // Set new timer: if no data for 3000ms, stop pipeline
+            this.watchdog = setTimeout(() => window.ui.stopAudioPipeline(), 3000);
 
             // Speed Calculation
             this.bytesReceived += b.byteLength;
@@ -1898,7 +1898,7 @@ const htmlContent = `
             // iOS Fix: If the next start time is in the past (underrun due to network delay or frequency switch),
             // reset it to now to prevent the browser from trying to catch up (stutter/fast-forward/loop effect).
             if (nextStartTime < now) {
-                nextStartTime = now + 0.8; // Increase buffer for stability on mobile
+                nextStartTime = now + 0.5; // Increase buffer for stability on mobile
             }
 
             const s = audioCtx.createBufferSource();
