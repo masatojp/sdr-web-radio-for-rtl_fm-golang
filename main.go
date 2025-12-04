@@ -39,7 +39,7 @@ const (
 	// Password removed. Use TUNE_AUTH_HASH in .env
 	InitialFreq    = 126450000
 	InitialMode    = "AM"
-	SampleRate     = 48000
+	SampleRate     = 24000
 	RecordingsPath = "./recordings"
 	BookmarksFile  = "./bookmarks.json"
 	SquelchFile    = "./squelch_data.json"
@@ -1890,7 +1890,7 @@ const htmlContent = `
             const s16 = new Int16Array(b, 4);
             for(let i=0; i<f.length; i++) f[i] = s16[i]/32768.0;
 
-            const buf = audioCtx.createBuffer(1, f.length, 48000);
+            const buf = audioCtx.createBuffer(1, f.length, 24000);
             buf.getChannelData(0).set(f);
 
             const now = audioCtx.currentTime;
