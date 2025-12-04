@@ -1408,6 +1408,7 @@ const htmlContent = `
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
 <style>
+    /* ... (スタイル部分は変更なし) ... */
     :root { --bg: #050507; --panel: rgba(30, 30, 35, 0.7); --acc: #00ffc8; --acc-dim: rgba(0,255,200,0.15); --txt: #fff; --sub: #8b9bb4; --mute: #4a4a4a; --open: #00e676; --stop: #ff3b30; --warn: #ffcc00; }
     body { background: var(--bg); color: var(--txt); font-family: 'Inter', sans-serif; margin: 0; display: flex; justify-content: center; min-height: 100vh; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
     .app { width: 100%; max-width: 480px; padding: 20px 20px 100px; box-sizing: border-box; padding-bottom: 150px; position: relative; }
@@ -1498,7 +1499,7 @@ const htmlContent = `
 </head>
 <body>
     <div class="app">
-        <div class="ver-tag">v2.2 (Secure/Fix)</div>
+        <div class="ver-tag">v2.3 (iOS BG Fix)</div>
         <div class="panel">
             <div class="badges">
                 <span class="badge" id="bdgMode">AM</span>
@@ -1660,7 +1661,7 @@ const htmlContent = `
         </div>
     </div>
 
-    <audio id="audioBridge" autoplay playsinline x-webkit-airplay="allow" style="opacity:0; pointer-events:none; position:absolute; left:-9999px;"></audio>
+    <audio id="audioBridge" autoplay playsinline disableRemotePlayback x-webkit-airplay="allow" style="opacity:0; pointer-events:none; position:absolute; left:-9999px;"></audio>
 
 <script>
     if ('serviceWorker' in navigator) {
@@ -1677,8 +1678,9 @@ const htmlContent = `
     let silenceNode = null;
     let noiseNode = null;
     
-    const SCHEDULE_AHEAD_TIME = 0.1;
-    const LOOKAHEAD_MS = 25;
+    // 【修正点】 iOSバックグラウンド再生のためのバッファ設定強化
+    const SCHEDULE_AHEAD_TIME = 0.5; // 先読み時間を0.1秒から0.5秒へ拡大（バックグラウンド時のタイマー遅延対策）
+    const LOOKAHEAD_MS = 100; // チェック間隔を25msから100msへ緩和
 
     window.ws = {
         c: null,
@@ -1807,15 +1809,22 @@ const htmlContent = `
             for(let i=0; i<f.length; i++) f[i] = s16[i]/32768.0;
 
             audioQueue.push(f);
+            
+            // Queueが溢れすぎないようにする（遅延防止）
+            if (audioQueue.length > 50) audioQueue.shift();
         }
     };
 
     function audioScheduler() {
         if (!audioCtx || !isPlaying) return;
         const currentTime = audioCtx.currentTime;
+        
+        // 【修正点】 iOSでバックグラウンドから復帰した際の時刻ズレを修正
+        // nextStartTimeが現在時刻より遅れている場合（アンダーラン）、強制的に現在時刻へ進める
         if (nextStartTime < currentTime) {
-            nextStartTime = currentTime + 0.01;
+            nextStartTime = currentTime;
         }
+
         while (audioQueue.length > 0 && nextStartTime < currentTime + SCHEDULE_AHEAD_TIME) {
             const pcm = audioQueue.shift();
             const buf = audioCtx.createBuffer(1, pcm.length, 48000);
@@ -1830,7 +1839,9 @@ const htmlContent = `
             src.start(nextStartTime);
             nextStartTime += buf.duration;
         }
-        if (audioQueue.length === 0 && nextStartTime < currentTime + 0.2) {
+        
+        // 【修正点】 バッファ切れ時の無音挿入ロジック（ドライバ停止防止）
+        if (audioQueue.length === 0 && nextStartTime < currentTime + 0.5) {
              const silentBuf = audioCtx.createBuffer(1, 1024, 48000);
              const silentSrc = audioCtx.createBufferSource();
              silentSrc.buffer = silentBuf;
@@ -1860,8 +1871,12 @@ const htmlContent = `
                 setTimeout(() => map.invalidateSize(), 100);
             }
             
+            // 【修正点】 アプリ復帰時のオーディオコンテキスト再開処理
             document.addEventListener('visibilitychange', () => {
                 if (document.visibilityState === 'visible') {
+                    if(audioCtx && audioCtx.state === 'suspended') {
+                        audioCtx.resume();
+                    }
                     if(audioCtx) nextStartTime = audioCtx.currentTime + 0.1;
                 }
             });
@@ -1887,6 +1902,7 @@ const htmlContent = `
                 const audioEl = document.getElementById('audioBridge');
                 audioEl.srcObject = dest.stream;
                 
+                // Noise Node to keep audio thread awake
                 noiseNode = audioCtx.createBufferSource();
                 const noiseBuf = audioCtx.createBuffer(1, 48000, 48000);
                 const noiseData = noiseBuf.getChannelData(0);
@@ -1946,6 +1962,7 @@ const htmlContent = `
             }
         },
 
+        // ... (以下変更なし) ...
         updateBtnState(s) {
             const btn = document.getElementById('btnAudio');
             if (s === 'running') {
