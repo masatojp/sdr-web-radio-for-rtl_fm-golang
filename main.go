@@ -9,6 +9,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
 	"io"
 	"io/fs"
 	"log"
@@ -33,7 +37,6 @@ import (
 // ==========================================
 const (
 	Port           = ":3000"
-	// Password removed. Use TUNE_AUTH_HASH in .env
 	InitialFreq    = 126450000
 	InitialMode    = "AM"
 	SampleRate     = 48000
@@ -174,7 +177,7 @@ type ProcessResult struct {
 func (d *AudioDSP) Process(input []byte, threshold int) ProcessResult {
 	numSamples := len(input) / 2
 	outBuf := new(bytes.Buffer)
-	
+
 	sqThresh := float64(threshold) / 100.0
 	var sumSq float64 = 0
 
@@ -183,7 +186,7 @@ func (d *AudioDSP) Process(input []byte, threshold int) ProcessResult {
 	for i := 0; i < numSamples; i++ {
 		var rawInt int16
 		binary.Read(reader, binary.LittleEndian, &rawInt)
-		
+
 		s := float64(rawInt) / 32768.0
 
 		// DC Offset Removal
@@ -195,8 +198,12 @@ func (d *AudioDSP) Process(input []byte, threshold int) ProcessResult {
 		// AGC
 		d.agcPeak = 0.999*d.agcPeak + 0.001*math.Abs(s)
 		g := 0.5 / (d.agcPeak + 0.01)
-		if g > 20.0 { g = 20.0 }
-		if g < 0.1 { g = 0.1 }
+		if g > 20.0 {
+			g = 20.0
+		}
+		if g < 0.1 {
+			g = 0.1
+		}
 		d.agcGain = 0.995*d.agcGain + 0.005*g
 
 		p := s * d.agcGain * d.squelchGate
@@ -211,8 +218,12 @@ func (d *AudioDSP) Process(input []byte, threshold int) ProcessResult {
 				p = p - (p*p*p)/27
 			}
 		}
-		if p > 0.99 { p = 0.99 }
-		if p < -0.99 { p = -0.99 }
+		if p > 0.99 {
+			p = 0.99
+		}
+		if p < -0.99 {
+			p = -0.99
+		}
 
 		outInt := int16(p * 32767)
 		binary.Write(outBuf, binary.LittleEndian, outInt)
@@ -283,19 +294,19 @@ var (
 		GPSUnlocked: false, // Default Locked
 	}
 	bookmarks []Bookmark
-    bmMu      sync.Mutex
+	bmMu      sync.Mutex
 	squelchDB = make(map[string]int)
-	
+
 	clients   = make(map[*SafeClient]bool)
 	broadcast = make(chan []byte)
 	statusMsg = make(chan []byte)
 	clientsMu sync.Mutex
 
 	cmdChan = make(chan bool)
-	
+
 	recFile *os.File
 	recMu   sync.Mutex
-	
+
 	upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool { return true },
 	}
@@ -312,7 +323,7 @@ func sendDiscordNotification() {
 	}
 
 	freqStr := fmt.Sprintf("%.3f MHz", float64(state.Freq)/1e6)
-	
+
 	payload := DiscordPayload{
 		Username: "SDR Commander",
 		Embeds: []DiscordEmbed{
@@ -346,37 +357,51 @@ func sendDiscordNotification() {
 func reverseGeocode(lat, lon float64) string {
 	url := fmt.Sprintf("https://nominatim.openstreetmap.org/reverse?format=json&lat=%f&lon=%f", lat, lon)
 	req, err := http.NewRequest("GET", url, nil)
-	if err != nil { return "" }
-	
+	if err != nil {
+		return ""
+	}
+
 	// Nominatim requires User-Agent
 	req.Header.Set("User-Agent", "SDR-Commander-Go/1.0")
-	
+
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
-	if err != nil { return "" }
+	if err != nil {
+		return ""
+	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 { return "" }
+	if resp.StatusCode != 200 {
+		return ""
+	}
 
 	var data NominatimResponse
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil { return "" }
-	
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return ""
+	}
+
 	return data.DisplayName
 }
 
 func parseNMEACoord(val, dir string) float64 {
-	if len(val) < 4 { return 0.0 }
+	if len(val) < 4 {
+		return 0.0
+	}
 	dot := strings.Index(val, ".")
-	if dot == -1 { return 0.0 }
-	
+	if dot == -1 {
+		return 0.0
+	}
+
 	degStr := val[:dot-2]
 	minStr := val[dot-2:]
-	
+
 	deg, _ := strconv.ParseFloat(degStr, 64)
 	min, _ := strconv.ParseFloat(minStr, 64)
-	
+
 	res := deg + min/60.0
-	if dir == "S" || dir == "W" { res = -res }
+	if dir == "S" || dir == "W" {
+		res = -res
+	}
 	return res
 }
 
@@ -462,7 +487,7 @@ func gpsManager() {
 
 						// Significant change check for Address Lookup
 						dist := math.Abs(state.Lat-lat) + math.Abs(state.Lon-lon)
-						
+
 						state.Lat = lat
 						state.Lon = lon
 						updated = true
@@ -522,9 +547,12 @@ func sdrManager() {
 
 		gainVal := "48"
 		switch att {
-		case "weak": gainVal = "29"
-		case "mid": gainVal = "9"
-		case "strong": gainVal = "0"
+		case "weak":
+			gainVal = "29"
+		case "mid":
+			gainVal = "9"
+		case "strong":
+			gainVal = "0"
 		}
 
 		args := []string{"-f", freqStr, "-g", gainVal, "-p", ppm, "-F", "9"}
@@ -532,13 +560,15 @@ func sdrManager() {
 			args = append(args, "-M", "wbfm", "-s", "240000", "-r", fmt.Sprintf("%d", SampleRate))
 		} else {
 			rtlMode := "am"
-			if mode == "FM" { rtlMode = "fm" }
+			if mode == "FM" {
+				rtlMode = "fm"
+			}
 			args = append(args, "-M", rtlMode, "-s", fmt.Sprintf("%d", SampleRate))
 		}
 
 		fmt.Printf("[Radio] Starting: rtl_fm %v\n", args)
 		cmd = exec.Command("rtl_fm", args...)
-		
+
 		var err error
 		stdout, err = cmd.StdoutPipe()
 		if err != nil {
@@ -566,17 +596,19 @@ func sdrManager() {
 					state.mu.Lock()
 					sq := state.Squelch
 					state.mu.Unlock()
-					
+
 					res := dsp.Process(buf[:n], sq)
 
 					header := new(bytes.Buffer)
 					binary.Write(header, binary.LittleEndian, res.RSSI)
 					isOpenInt := int16(0)
-					if res.IsOpen { isOpenInt = 1 }
+					if res.IsOpen {
+						isOpenInt = 1
+					}
 					binary.Write(header, binary.LittleEndian, isOpenInt)
-					
+
 					packet := append(header.Bytes(), res.Buffer...)
-					
+
 					select {
 					case broadcast <- packet:
 					default:
@@ -598,7 +630,7 @@ func sdrManager() {
 			}
 		case <-done:
 		}
-		
+
 		cmd.Wait()
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -659,7 +691,7 @@ func getSystemStats() SystemStats {
 			}
 		}
 	}
-	
+
 	// 5. Load Average
 	if loadavg, err := os.ReadFile("/proc/loadavg"); err == nil {
 		fields := strings.Fields(string(loadavg))
@@ -710,7 +742,7 @@ func startRecording() {
 	dateStr := now.Format("2006-01-02")
 	// Folder: xxx.xxxMHz
 	freqStr := fmt.Sprintf("%.3fMHz", float64(state.Freq)/1e6)
-	
+
 	// File Prefix: YYYY-MM-DD_hh-mm-ss
 	timeStr := now.Format("2006-01-02_15-04-05")
 
@@ -741,42 +773,45 @@ func startRecording() {
 	// File Name: YYYY-MM-DD_hh-mm-ss_Freq_Title_GPS.wav
 	filename := fmt.Sprintf("%s_%s%s%s.wav", timeStr, freqStr, titlePart, gpsInfo)
 	path := filepath.Join(dirPath, filename)
-	
+
 	f, err := os.Create(path)
 	if err != nil {
 		log.Println("Rec error:", err)
 		state.mu.Unlock()
 		return
 	}
-	
+
 	writeWavHeader(f, SampleRate, 0)
-	
+
 	recMu.Lock()
 	recFile = f
 	recMu.Unlock()
 
 	state.IsRecording = true
 	state.RecFilename = path // Store full path for stopping later
-	
+
 	state.mu.Unlock()
-	
+
 	broadcastStatus()
 }
 
 func stopRecording() {
 	state.mu.Lock()
-	if !state.IsRecording { state.mu.Unlock(); return }
+	if !state.IsRecording {
+		state.mu.Unlock()
+		return
+	}
 	state.IsRecording = false
 	state.mu.Unlock()
 
 	recMu.Lock()
 	defer recMu.Unlock()
-	
+
 	if recFile != nil {
 		stat, _ := recFile.Stat()
 		size := stat.Size()
 		dataLen := uint32(size - 44)
-		
+
 		recFile.Seek(0, 0)
 		writeWavHeader(recFile, SampleRate, dataLen)
 		recFile.Close()
@@ -835,9 +870,9 @@ func saveBookmarksToFile() {
 }
 
 func saveBookmarks() {
-    bmMu.Lock()
-    defer bmMu.Unlock()
-    saveBookmarksToFile()
+	bmMu.Lock()
+	defer bmMu.Unlock()
+	saveBookmarksToFile()
 }
 
 func saveSquelch() {
@@ -852,9 +887,13 @@ func saveSquelch() {
 func isDescendant(checkID, potentialAncestorID string, all []Bookmark) bool {
 	currentID := checkID
 	for {
-		if currentID == "" { return false }
-		if currentID == potentialAncestorID { return true }
-		
+		if currentID == "" {
+			return false
+		}
+		if currentID == potentialAncestorID {
+			return true
+		}
+
 		parentID := ""
 		found := false
 		for _, b := range all {
@@ -864,7 +903,9 @@ func isDescendant(checkID, potentialAncestorID string, all []Bookmark) bool {
 				break
 			}
 		}
-		if !found { return false }
+		if !found {
+			return false
+		}
 		currentID = parentID
 	}
 }
@@ -872,7 +913,7 @@ func isDescendant(checkID, potentialAncestorID string, all []Bookmark) bool {
 func broadcastStatus() {
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	
+
 	clientsMu.Lock()
 	connCount := len(clients)
 	clientsMu.Unlock()
@@ -886,7 +927,7 @@ func broadcastStatus() {
 	} else {
 		lat, lon = 0, 0
 		addr = ""
-		gpsStatus = "locked" 
+		gpsStatus = "locked"
 	}
 
 	msg := map[string]interface{}{
@@ -913,11 +954,13 @@ func broadcastRecordings() {
 	dateMap := make(map[string]map[string][]RecFileEntry)
 
 	filepath.WalkDir(RecordingsPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil { return nil }
+		if err != nil {
+			return nil
+		}
 		if !d.IsDir() && strings.HasSuffix(d.Name(), ".wav") {
 			rel, _ := filepath.Rel(RecordingsPath, path)
 			parts := strings.Split(rel, string(os.PathSeparator))
-			
+
 			info, _ := d.Info()
 			var date, freq string
 
@@ -950,7 +993,7 @@ func broadcastRecordings() {
 			if dateMap[date] == nil {
 				dateMap[date] = make(map[string][]RecFileEntry)
 			}
-			
+
 			dateMap[date][freq] = append(dateMap[date][freq], RecFileEntry{
 				Name: d.Name(),
 				Path: rel, // 相対パス（ダウンロード・削除用）
@@ -971,12 +1014,12 @@ func broadcastRecordings() {
 		}
 		// Sort freqs asc
 		sort.Slice(freqList, func(i, j int) bool { return freqList[i].Freq < freqList[j].Freq })
-		
+
 		dateList = append(dateList, RecDateEntry{Date: date, Freqs: freqList})
 	}
 	// Sort dates desc (newest first)
 	sort.Slice(dateList, func(i, j int) bool { return dateList[i].Date > dateList[j].Date })
-	
+
 	msg := map[string]interface{}{
 		"type": "recordings",
 		"data": dateList,
@@ -1010,8 +1053,10 @@ func handleMessages() {
 
 func checkAuthHash(envKey, inputPass string) bool {
 	targetHash := os.Getenv(envKey)
-	if targetHash == "" { return false }
-	
+	if targetHash == "" {
+		return false
+	}
+
 	sum := sha256.Sum256([]byte(inputPass))
 	inputHash := hex.EncodeToString(sum[:])
 	return inputHash == targetHash
@@ -1019,8 +1064,10 @@ func checkAuthHash(envKey, inputPass string) bool {
 
 func wsHandler(w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
-	if err != nil { return }
-	
+	if err != nil {
+		return
+	}
+
 	client := &SafeClient{Conn: ws}
 
 	clientsMu.Lock()
@@ -1028,12 +1075,12 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	clientsMu.Unlock()
 
 	broadcastStatus()
-	
-    bmMu.Lock()
+
+	bmMu.Lock()
 	bmMsg, _ := json.Marshal(map[string]interface{}{"type": "bookmarks", "data": bookmarks})
-    bmMu.Unlock()
+	bmMu.Unlock()
 	client.WriteMessage(websocket.TextMessage, bmMsg)
-	
+
 	broadcastRecordings()
 
 	for {
@@ -1045,10 +1092,12 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			broadcastStatus()
 			break
 		}
-		
+
 		var cmd WSCommand
-		if err := json.Unmarshal(msg, &cmd); err != nil { continue }
-		
+		if err := json.Unmarshal(msg, &cmd); err != nil {
+			continue
+		}
+
 		switch cmd.Type {
 		case "auth_tune":
 			if checkAuthHash("TUNE_AUTH_HASH", cmd.Password) {
@@ -1066,15 +1115,15 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				go func() { cmdChan <- true }()
 				broadcastStatus()
 			}
-		
+
 		case "auth_gps":
 			if checkAuthHash("GPS_AUTH_HASH", cmd.GPSPassword) {
 				state.mu.Lock()
-				state.GPSUnlocked = !state.GPSUnlocked 
+				state.GPSUnlocked = !state.GPSUnlocked
 				state.mu.Unlock()
 				broadcastStatus()
 			}
-		
+
 		case "auth_debug":
 			if checkAuthHash("DEBUG_AUTH_HASH", cmd.DebugPassword) {
 				client.mu.Lock()
@@ -1101,10 +1150,10 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		case "stop_recording":
 			stopRecording()
 		case "delete_recording":
-            if !checkAuthHash("DELETE_AUTH_HASH", cmd.DeletePassword) {
-                client.WriteJSON(map[string]interface{}{"type": "error", "msg": "Invalid delete password"})
-                break
-            }
+			if !checkAuthHash("DELETE_AUTH_HASH", cmd.DeletePassword) {
+				client.WriteJSON(map[string]interface{}{"type": "error", "msg": "Invalid delete password"})
+				break
+			}
 			// Filename is now a relative path
 			// Prevent traversal
 			if !strings.Contains(cmd.Filename, "..") {
@@ -1112,20 +1161,20 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				// Check if dir is empty and remove it? (Optional, skipping for safety)
 				broadcastRecordings()
 			}
-		
+
 		case "add_bookmark":
-            bmMu.Lock()
+			bmMu.Lock()
 			var b Bookmark
 			json.Unmarshal(cmd.Data, &b)
 			b.ID = fmt.Sprintf("%d", time.Now().UnixMilli())
 			bookmarks = append(bookmarks, b)
-            saveBookmarksToFile() 
-            bmMsg, _ := json.Marshal(map[string]interface{}{"type": "bookmarks", "data": bookmarks})
-            bmMu.Unlock()
+			saveBookmarksToFile()
+			bmMsg, _ := json.Marshal(map[string]interface{}{"type": "bookmarks", "data": bookmarks})
+			bmMu.Unlock()
 			statusMsg <- bmMsg
 
 		case "delete_bookmark":
-            bmMu.Lock()
+			bmMu.Lock()
 			newBM := []Bookmark{}
 			for _, b := range bookmarks {
 				if b.ID != cmd.ID && b.ParentID != cmd.ID {
@@ -1135,11 +1184,11 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			bookmarks = newBM
 			saveBookmarksToFile()
 			bmMsg, _ := json.Marshal(map[string]interface{}{"type": "bookmarks", "data": bookmarks})
-            bmMu.Unlock()
+			bmMu.Unlock()
 			statusMsg <- bmMsg
-		
+
 		case "edit_bookmark":
-            bmMu.Lock()
+			bmMu.Lock()
 			var data Bookmark
 			json.Unmarshal(cmd.Data, &data)
 			for i, b := range bookmarks {
@@ -1154,21 +1203,35 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			saveBookmarksToFile()
 			bmMsg, _ := json.Marshal(map[string]interface{}{"type": "bookmarks", "data": bookmarks})
-            bmMu.Unlock()
+			bmMu.Unlock()
 			statusMsg <- bmMsg
 
 		case "move_bookmark":
-            bmMu.Lock()
+			bmMu.Lock()
 			idx := -1
-			for i, b := range bookmarks { if b.ID == cmd.ID { idx = i; break } }
+			for i, b := range bookmarks {
+				if b.ID == cmd.ID {
+					idx = i
+					break
+				}
+			}
 			if idx != -1 {
 				target := bookmarks[idx]
 				siblings := []int{}
-				for i, b := range bookmarks { if b.ParentID == target.ParentID { siblings = append(siblings, i) } }
-				
+				for i, b := range bookmarks {
+					if b.ParentID == target.ParentID {
+						siblings = append(siblings, i)
+					}
+				}
+
 				sIdx := -1
-				for i, globalIdx := range siblings { if globalIdx == idx { sIdx = i; break } }
-				
+				for i, globalIdx := range siblings {
+					if globalIdx == idx {
+						sIdx = i
+						break
+					}
+				}
+
 				if cmd.Dir == "up" && sIdx > 0 {
 					swapIdx := siblings[sIdx-1]
 					bookmarks[idx], bookmarks[swapIdx] = bookmarks[swapIdx], bookmarks[idx]
@@ -1180,17 +1243,22 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				bmMsg, _ := json.Marshal(map[string]interface{}{"type": "bookmarks", "data": bookmarks})
 				statusMsg <- bmMsg
 			}
-            bmMu.Unlock()
+			bmMu.Unlock()
 
 		case "change_parent":
-            bmMu.Lock()
+			bmMu.Lock()
 			var target Bookmark
-			for _, b := range bookmarks { if b.ID == cmd.ID { target = b; break } }
-			
+			for _, b := range bookmarks {
+				if b.ID == cmd.ID {
+					target = b
+					break
+				}
+			}
+
 			if target.IsFolder {
 				if isDescendant(cmd.NewParentID, target.ID, bookmarks) {
-                    bmMu.Unlock()
-					continue 
+					bmMu.Unlock()
+					continue
 				}
 			}
 
@@ -1202,25 +1270,104 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			saveBookmarksToFile()
 			bmMsg, _ := json.Marshal(map[string]interface{}{"type": "bookmarks", "data": bookmarks})
-            bmMu.Unlock()
+			bmMu.Unlock()
 			statusMsg <- bmMsg
 		}
 	}
 }
 
 // ==========================================
-// 11. Main & HTML Content
+// 11. PWA & Main & HTML Content
 // ==========================================
+
+// PWA: Manifest JSON
+const manifestContent = `{
+  "name": "SDR COMMANDER",
+  "short_name": "SDR Cmd",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#050507",
+  "theme_color": "#050507",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}`
+
+// PWA: Service Worker JS
+const swContent = `
+const CACHE_NAME = 'sdr-cmd-v1';
+const ASSETS = [
+  '/',
+  '/manifest.json',
+  '/icons/icon-192.png',
+  '/icons/icon-512.png'
+];
+
+self.addEventListener('install', (e) => {
+  e.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS))
+  );
+});
+
+self.addEventListener('fetch', (e) => {
+  const url = new URL(e.request.url);
+  // Do not cache API/WS calls
+  if (url.pathname.startsWith('/ws') || url.pathname.startsWith('/download/')) {
+    return;
+  }
+  e.respondWith(
+    caches.match(e.request).then((res) => res || fetch(e.request))
+  );
+});
+`
+
+// Helper to generate a dummy icon png
+func generateIcon(w http.ResponseWriter, size int) {
+	img := image.NewRGBA(image.Rect(0, 0, size, size))
+	// Black background
+	draw.Draw(img, img.Bounds(), &image.Uniform{color.RGBA{5, 5, 7, 255}}, image.Point{}, draw.Src)
+	// Green accent box in middle
+	draw.Draw(img, image.Rect(size/4, size/4, size*3/4, size*3/4), &image.Uniform{color.RGBA{0, 255, 200, 255}}, image.Point{}, draw.Src)
+
+	w.Header().Set("Content-Type", "image/png")
+	png.Encode(w, img)
+}
 
 func main() {
 	flag.Parse()
-	
+
 	err := godotenv.Load()
 	if err != nil {
 		log.Println("Note: .env file not found, continuing without env vars")
 	}
 
 	loadData()
+
+	// PWA Handlers
+	http.HandleFunc("/manifest.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(manifestContent))
+	})
+	http.HandleFunc("/service-worker.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		w.Write([]byte(swContent))
+	})
+	http.HandleFunc("/icons/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "192") {
+			generateIcon(w, 192)
+		} else {
+			generateIcon(w, 512)
+		}
+	})
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
@@ -1236,7 +1383,7 @@ func main() {
 				http.NotFound(w, r)
 				return
 			}
-			
+
 			fpath := filepath.Join(RecordingsPath, relPath)
 			if _, err := os.Stat(fpath); err == nil {
 				w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filepath.Base(fpath)))
@@ -1250,7 +1397,7 @@ func main() {
 	http.HandleFunc("/ws", wsHandler)
 
 	go sdrManager()
-	go gpsManager() // GPS
+	go gpsManager()   // GPS
 	go debugMonitor() // System Stats
 	go handleMessages()
 
@@ -1269,6 +1416,11 @@ const htmlContent = `
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#050507">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icons/icon-192.png">
 <title>SDR COMMANDER</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@700&display=swap">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
@@ -1555,6 +1707,14 @@ const htmlContent = `
     <audio id="audioBridge" autoplay playsinline loop style="display:none;"></audio>
 
 <script>
+    if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+            navigator.serviceWorker.register('/service-worker.js')
+                .then(reg => console.log('SW registered!', reg))
+                .catch(err => console.log('SW failed', err));
+        });
+    }
+
     let audioCtx;
     let map, marker;
     const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false, moveTargetId: null, gpsUnlocked: false, deleteTarget: null };
@@ -2133,21 +2293,21 @@ const htmlContent = `
                                  '<div onclick="window.ui.togFreq(\'' + dateGroup.date + '\', \'' + freqGroup.freq + '\')" style="padding:8px 0; font-size:0.9rem; color:var(--acc); font-weight:bold; cursor:pointer; display:flex; align-items:center;">' + 
                                  '<span class="material-symbols-outlined icon '+(isFreqOpen?'rot':'')+'" style="font-size:1rem; margin-right:5px;">chevron_right</span>' +
                                  freqGroup.freq + '</div>';
-                         
+                          
                          if (isFreqOpen) {
                              freqGroup.files.forEach(f => {
                                  html += '<div class="row" style="margin-bottom:2px;">' +
-                                        '<div class="row-click-area">' +
-                                            '<div class="txt">' +
-                                                '<span style="font-weight:600; font-size:0.85rem; word-break:break-all;">'+f.name+'</span>' +
-                                                '<span class="sub">'+(f.size/1024/1024).toFixed(2)+' MB</span>' +
-                                            '</div>' +
-                                        '</div>' +
-                                        '<div class="act">' +
-                                            '<a href="/download/'+f.path+'" class="ib" download><span class="material-symbols-outlined">download</span></a>' +
-                                            '<button class="ib ib-del" onclick="window.ws.delRec(\''+f.path+'\')"><span class="material-symbols-outlined">delete</span></button>' +
-                                        '</div>' +
-                                    '</div>';
+                                         '<div class="row-click-area">' +
+                                             '<div class="txt">' +
+                                                 '<span style="font-weight:600; font-size:0.85rem; word-break:break-all;">'+f.name+'</span>' +
+                                                 '<span class="sub">'+(f.size/1024/1024).toFixed(2)+' MB</span>' +
+                                             '</div>' +
+                                         '</div>' +
+                                         '<div class="act">' +
+                                             '<a href="/download/'+f.path+'" class="ib" download><span class="material-symbols-outlined">download</span></a>' +
+                                             '<button class="ib ib-del" onclick="window.ws.delRec(\''+f.path+'\')"><span class="material-symbols-outlined">delete</span></button>' +
+                                         '</div>' +
+                                     '</div>';
                              });
                          }
                          html += '</div>';
