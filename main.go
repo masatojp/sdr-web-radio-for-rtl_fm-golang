@@ -1852,11 +1852,15 @@ const htmlContent = `
 
             const now = audioCtx.currentTime;
             
-            // iOS Background Fix: Add latency safety margin for background playback
-            const latency = document.hidden ? 0.15 : 0.02;
+            // iOS Background Fix: Increased latency safety margin to prevent stuttering/looping
+            // Background: 0.40s (more robust against throttling), Foreground: 0.05s
+            const latency = document.hidden ? 0.40 : 0.05;
+            
+            // Relaxed drift tolerance to prevent frequent resets
+            const driftTolerance = document.hidden ? 0.5 : 0.2;
 
             // Reset timing if we drifted too far or fell behind
-            if (nextStartTime < now || nextStartTime > now + 0.5) {
+            if (nextStartTime < now || nextStartTime > now + driftTolerance) {
                 nextStartTime = now + latency;
             }
 
