@@ -535,7 +535,7 @@ func sdrManager() {
 	var cmd *exec.Cmd
 	var stdout io.ReadCloser
 	dsp := NewAudioDSP()
-	chunkSize := 8192
+	chunkSize := 16384
 	buf := make([]byte, chunkSize)
 
 	for {
@@ -1888,7 +1888,7 @@ const htmlContent = `
             // iOS Fix: If the next start time is in the past (underrun due to network delay or frequency switch),
             // reset it to now to prevent the browser from trying to catch up (stutter/fast-forward/loop effect).
             if (nextStartTime < now) {
-                nextStartTime = now + 0.3; // Increase buffer for stability
+                nextStartTime = now + 0.8; // Increase buffer for stability on mobile
             }
 
             const s = audioCtx.createBufferSource();
