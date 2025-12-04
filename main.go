@@ -1704,8 +1704,8 @@ const htmlContent = `
         </div>
     </div>
 
-    <!-- iOS Fix: Audio Bridge with Loop -->
-    <audio id="audioBridge" autoplay playsinline loop style="opacity:0; pointer-events:none; position:absolute; left:-9999px;"></audio>
+    <!-- iOS Fix: Audio Bridge with NO Loop (Fix stutter) -->
+    <audio id="audioBridge" autoplay playsinline style="opacity:0; pointer-events:none; position:absolute; left:-9999px;"></audio>
 
 <script>
     if ('serviceWorker' in navigator) {
@@ -1867,6 +1867,9 @@ const htmlContent = `
 
             const s = audioCtx.createBufferSource();
             s.buffer = buf;
+            
+            // FIX: Always connect to window.audioDest if available
+            // connecting to audioCtx.destination directly in background often fails on iOS
             if (window.audioDest) s.connect(window.audioDest);
             else s.connect(audioCtx.destination);
             
@@ -1972,7 +1975,8 @@ const htmlContent = `
                     const silentGain = audioCtx.createGain();
                     silentGain.gain.value = 0.001; // Nearly silent
                     keepAliveOsc.connect(silentGain);
-                    silentGain.connect(audioCtx.destination);
+                    // IMPORTANT: Connect to dest (MediaStream), NOT destination directly
+                    silentGain.connect(dest); 
                     keepAliveOsc.start();
                 }
 
@@ -1985,7 +1989,8 @@ const htmlContent = `
                             output[i] = (Math.random() * 0.000001); 
                         }
                     };
-                    dummyNode.connect(audioCtx.destination);
+                    // IMPORTANT: Connect to dest (MediaStream), NOT destination directly
+                    dummyNode.connect(dest);
                 }
 
                 this.updateBtnState('running');
