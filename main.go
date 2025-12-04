@@ -1704,8 +1704,8 @@ const htmlContent = `
         </div>
     </div>
 
-    <!-- Hidden audio element for iOS PWA background play workaround -->
-    <audio id="audioBridge" autoplay playsinline preload="auto" controls style="opacity:0; pointer-events:none; position:absolute; left:-9999px;"></audio>
+    <!-- iOS Fix: Audio Bridge with Loop -->
+    <audio id="audioBridge" autoplay playsinline loop style="opacity:0; pointer-events:none; position:absolute; left:-9999px;"></audio>
 
 <script>
     if ('serviceWorker' in navigator) {
@@ -1720,8 +1720,8 @@ const htmlContent = `
     let map, marker;
     const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false, moveTargetId: null, gpsUnlocked: false, deleteTarget: null };
     let nextStartTime = 0; 
-    let keepAliveOsc = null; // iOS keep-alive oscillator
-    let dummyNode = null; // Silent Audio Hack Node
+    let keepAliveOsc = null; 
+    let dummyNode = null; 
 
     // WebSocket Definition
     window.ws = {
@@ -1738,9 +1738,9 @@ const htmlContent = `
                     else if(m.type==='recordings') window.ui.renderRec(m.data);
                     else if(m.type==='debug_info') window.ui.updDebug(m.data);
                     else if(m.type==='debug_auth_success') {
-                         window.ui.closeModal();
-                         document.getElementById('debugPanel').style.display = 'flex';
-                     }
+                          window.ui.closeModal();
+                          document.getElementById('debugPanel').style.display = 'flex';
+                      }
                     else if(m.type==='error') alert(m.msg);
                 } else this.audio(e.data);
             };
@@ -1900,8 +1900,8 @@ const htmlContent = `
             // Reset audio timing when switching visibility
             document.addEventListener('visibilitychange', () => {
                 if (audioCtx && audioCtx.state === 'running') {
-                     // Force re-sync on visibility change
-                     nextStartTime = 0; 
+                      // Force re-sync on visibility change
+                      nextStartTime = 0; 
                 }
             });
             
@@ -1958,21 +1958,31 @@ const htmlContent = `
                 audioEl.srcObject = dest.stream;
                 window.audioDest = dest;
 
+                // iOS: Must call play() inside a user event handler
                 try {
                     await audioEl.play();
                 } catch(e) { console.warn('Audio play failed', e); }
 
                 // --- SILENT AUDIO HACK FOR iOS ---
-                // Keep the audio context active even when no data is arriving
-                // using a ScriptProcessorNode (deprecated but effective on iOS)
-                // This forces the audio thread to stay alive.
+                // Strategy 1: Constant silent oscillator to keep hardware hot
+                if (!keepAliveOsc) {
+                    keepAliveOsc = audioCtx.createOscillator();
+                    keepAliveOsc.type = 'sine';
+                    keepAliveOsc.frequency.value = 1; // 1Hz
+                    const silentGain = audioCtx.createGain();
+                    silentGain.gain.value = 0.001; // Nearly silent
+                    keepAliveOsc.connect(silentGain);
+                    silentGain.connect(audioCtx.destination);
+                    keepAliveOsc.start();
+                }
+
+                // Strategy 2: ScriptProcessor (legacy fix)
                 if (!dummyNode) {
                     dummyNode = audioCtx.createScriptProcessor(4096, 1, 1);
                     dummyNode.onaudioprocess = (e) => {
-                        // Just generate silence, or very faint noise to be sure
                         const output = e.outputBuffer.getChannelData(0);
                         for (let i = 0; i < output.length; i++) {
-                            output[i] = (Math.random() * 0.000001); // Tiny noise
+                            output[i] = (Math.random() * 0.000001); 
                         }
                     };
                     dummyNode.connect(audioCtx.destination);
@@ -1983,15 +1993,17 @@ const htmlContent = `
                 return;
             }
 
+            const audioEl = document.getElementById('audioBridge');
+
             if (audioCtx.state === 'running') {
                 audioCtx.suspend().then(() => {
                     this.updateBtnState('suspended');
-                    document.getElementById('audioBridge').pause();
+                    audioEl.pause();
                     if('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
                 });
             } else {
                 audioCtx.resume().then(() => {
-                    document.getElementById('audioBridge').play().catch(()=>{});
+                    audioEl.play().catch(()=>{});
                     this.updateBtnState('running');
                     this.updateMediaMetadata();
                 });
@@ -2188,11 +2200,11 @@ const htmlContent = `
                 document.getElementById('addTitle').innerText = target.isFolder ? "Edit Folder" : "Edit Channel";
                 document.getElementById('addName').value = target.title;
                 if (target.isFolder) {
-                     document.getElementById('addFreqGroup').style.display = 'none';
+                      document.getElementById('addFreqGroup').style.display = 'none';
                 } else {
-                     document.getElementById('addFreqGroup').style.display = 'block';
-                     document.getElementById('addFreq').value = target.freq;
-                     this.selAddMod(target.mode);
+                      document.getElementById('addFreqGroup').style.display = 'block';
+                      document.getElementById('addFreq').value = target.freq;
+                      this.selAddMod(target.mode);
                 }
             } else if (type === 'move') {
                 state.moveTargetId = id;
@@ -2340,31 +2352,31 @@ const htmlContent = `
                 
                 if (isDateOpen) {
                     dateGroup.freqs.forEach(freqGroup => {
-                         const freqId = 'freq_' + dateGroup.date + '_' + freqGroup.freq;
-                         const isFreqOpen = state.expanded.has(freqId);
+                          const freqId = 'freq_' + dateGroup.date + '_' + freqGroup.freq;
+                          const isFreqOpen = state.expanded.has(freqId);
 
-                         html += '<div style="margin-left:15px; border-left:2px solid rgba(255,255,255,0.1); padding-left:10px;">' +
-                                 '<div onclick="window.ui.togFreq(\'' + dateGroup.date + '\', \'' + freqGroup.freq + '\')" style="padding:8px 0; font-size:0.9rem; color:var(--acc); font-weight:bold; cursor:pointer; display:flex; align-items:center;">' + 
-                                 '<span class="material-symbols-outlined icon '+(isFreqOpen?'rot':'')+'" style="font-size:1rem; margin-right:5px;">chevron_right</span>' +
-                                 freqGroup.freq + '</div>';
+                          html += '<div style="margin-left:15px; border-left:2px solid rgba(255,255,255,0.1); padding-left:10px;">' +
+                                  '<div onclick="window.ui.togFreq(\'' + dateGroup.date + '\', \'' + freqGroup.freq + '\')" style="padding:8px 0; font-size:0.9rem; color:var(--acc); font-weight:bold; cursor:pointer; display:flex; align-items:center;">' + 
+                                  '<span class="material-symbols-outlined icon '+(isFreqOpen?'rot':'')+'" style="font-size:1rem; margin-right:5px;">chevron_right</span>' +
+                                  freqGroup.freq + '</div>';
                           
-                         if (isFreqOpen) {
-                             freqGroup.files.forEach(f => {
-                                 html += '<div class="row" style="margin-bottom:2px;">' +
-                                         '<div class="row-click-area">' +
-                                             '<div class="txt">' +
-                                                 '<span style="font-weight:600; font-size:0.85rem; word-break:break-all;">'+f.name+'</span>' +
-                                                 '<span class="sub">'+(f.size/1024/1024).toFixed(2)+' MB</span>' +
-                                             '</div>' +
-                                         '</div>' +
-                                         '<div class="act">' +
-                                             '<a href="/download/'+f.path+'" class="ib" download><span class="material-symbols-outlined">download</span></a>' +
-                                             '<button class="ib ib-del" onclick="window.ws.delRec(\''+f.path+'\')"><span class="material-symbols-outlined">delete</span></button>' +
-                                         '</div>' +
-                                     '</div>';
-                             });
-                         }
-                         html += '</div>';
+                          if (isFreqOpen) {
+                              freqGroup.files.forEach(f => {
+                                  html += '<div class="row" style="margin-bottom:2px;">' +
+                                              '<div class="row-click-area">' +
+                                                  '<div class="txt">' +
+                                                      '<span style="font-weight:600; font-size:0.85rem; word-break:break-all;">'+f.name+'</span>' +
+                                                      '<span class="sub">'+(f.size/1024/1024).toFixed(2)+' MB</span>' +
+                                                  '</div>' +
+                                              '</div>' +
+                                              '<div class="act">' +
+                                                  '<a href="/download/'+f.path+'" class="ib" download><span class="material-symbols-outlined">download</span></a>' +
+                                                  '<button class="ib ib-del" onclick="window.ws.delRec(\''+f.path+'\')"><span class="material-symbols-outlined">delete</span></button>' +
+                                              '</div>' +
+                                          '</div>';
+                              });
+                          }
+                          html += '</div>';
                     });
                 }
             });
