@@ -2059,8 +2059,8 @@ const htmlContent = `
             const id = 'date_' + date;
             if(state.expanded.has(id)) state.expanded.delete(id); else state.expanded.add(id);
             // re-render recordings is implicitly handled by websocket updates usually, but here we might need manual trigger or just wait for next update.
-            // For simplicity, let's just re-request or rely on the fact that `renderRec` uses `state.expanded` if we pass the same data.
-            // But `renderRec` is called with data from server. We need to store that data.
+            // For simplicity, let's just re-request or rely on the fact that 'renderRec' uses 'state.expanded' if we pass the same data.
+            // But 'renderRec' is called with data from server. We need to store that data.
             // Let's store recData in state
             if (state.recData) this.renderRec(state.recData);
         },
