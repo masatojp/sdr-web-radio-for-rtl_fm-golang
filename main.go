@@ -1529,9 +1529,9 @@ const htmlContent = `
     .btn-unlock { background: var(--acc); color:#000; font-weight:bold; padding:8px 16px; border-radius:8px; border:none; cursor:pointer; }
 
     /* Debug Styles */
-    .debug-panel { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(10,10,12,0.95); padding: 15px; border-top: 1px solid #333; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: #aaa; z-index: 2000; display: none; justify-content: space-around; flex-wrap: wrap; }
-    .debug-item { text-align: center; margin: 5px; }
-    .debug-val { font-size: 1.0rem; color: #fff; font-weight: bold; }
+    .debug-panel { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(10,10,12,0.95); padding: 15px; border-top: 1px solid #333; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: #aaa; z-index: 2000; display: none; justify-content: center; flex-wrap: wrap; gap: 15px; }
+    .debug-item { text-align: center; min-width: 60px; }
+    .debug-val { font-size: 1.0rem; color: #fff; font-weight: bold; line-height: 1.1; margin-bottom: 2px; }
 </style>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 </head>
@@ -1862,7 +1862,7 @@ const htmlContent = `
             if (nowTime - this.lastSpeedUpdate >= 1000) {
                 const mbps = (this.bytesReceived * 8 / 1000000).toFixed(2);
                 const el = document.getElementById('dbgSpeed');
-                if(el) el.innerText = mbps + ' Mbps';
+                if(el) el.innerHTML = mbps + '<br><span style="font-size:0.7em; font-weight:normal; color:#aaa">Mbps</span>';
                 this.bytesReceived = 0;
                 this.lastSpeedUpdate = nowTime;
             }
