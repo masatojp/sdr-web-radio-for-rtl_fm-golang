@@ -1853,11 +1853,11 @@ const htmlContent = `
             const now = audioCtx.currentTime;
             
             // iOS Background Fix: Increased latency safety margin to prevent stuttering/looping
-            // Background: 0.40s (more robust against throttling), Foreground: 0.05s
-            const latency = document.hidden ? 0.40 : 0.05;
+            // Background: 0.50s (more robust against throttling), Foreground: 0.10s
+            const latency = document.hidden ? 0.50 : 0.10;
             
-            // Relaxed drift tolerance to prevent frequent resets
-            const driftTolerance = document.hidden ? 0.5 : 0.2;
+            // Relaxed drift tolerance to prevent frequent resets (must be significantly > latency)
+            const driftTolerance = document.hidden ? 3.0 : 0.5;
 
             // Reset timing if we drifted too far or fell behind
             if (nextStartTime < now || nextStartTime > now + driftTolerance) {
@@ -1902,6 +1902,11 @@ const htmlContent = `
                      nextStartTime = 0; 
                 }
             });
+            
+            // iOS Fix: Ensure AudioContext resumes on touch (not just click)
+            document.body.addEventListener('touchstart', () => {
+                if (audioCtx && audioCtx.state !== 'running') audioCtx.resume();
+            }, {passive: true});
 
             if ('mediaSession' in navigator) {
                 const ms = navigator.mediaSession;
@@ -1935,8 +1940,8 @@ const htmlContent = `
             const btn = document.getElementById('btnAudio');
             if (!audioCtx) {
                 const Ctx = window.AudioContext || window.webkitAudioContext;
-                // Use 'playback' latency hint for better stability in background on iOS
-                audioCtx = new Ctx({ latencyHint: 'playback' }); 
+                // Fix sample rate to 48000 to match server and prevent resampling artifacts
+                audioCtx = new Ctx({ latencyHint: 'playback', sampleRate: 48000 }); 
                 
                 // Auto-resume if interrupted by system sounds/calls
                 audioCtx.onstatechange = () => {
