@@ -298,7 +298,7 @@ var (
 	squelchDB = make(map[string]int)
 
 	clients   = make(map[*SafeClient]bool)
-	broadcast = make(chan []byte)
+	broadcast = make(chan []byte, 256) // バッファサイズを明示
 	statusMsg = make(chan []byte)
 	clientsMu sync.Mutex
 
@@ -536,6 +536,18 @@ func sdrManager() {
 	buf := make([]byte, chunkSize)
 
 	for {
+		// 重要：プロセス起動前に古いブロードキャストデータを破棄する
+		// これにより、周波数変更時に前の周波数の残響がクライアントに届くのを防ぐ
+	drainLoop:
+		for {
+			select {
+			case <-broadcast:
+				// 読み捨てる
+			default:
+				break drainLoop
+			}
+		}
+
 		state.mu.Lock()
 		freqStr := fmt.Sprintf("%d", state.Freq)
 		mode := state.Mode
@@ -632,7 +644,8 @@ func sdrManager() {
 		}
 
 		cmd.Wait()
-		time.Sleep(200 * time.Millisecond)
+		// プロセス再起動間のウェイトを少し短縮
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -1326,7 +1339,7 @@ self.addEventListener('fetch', event => {
   if (event.request.url.includes('/ws') || event.request.url.includes('/download/')) {
     return;
   }
-  
+   
   event.respondWith(
     caches.match(event.request)
       .then(response => {
@@ -1708,7 +1721,8 @@ const htmlContent = `
         </div>
     </div>
 
-    <audio id="audioBridge" autoplay playsinline loop style="display:none;"></audio>
+    <!-- Removed loop attribute to prevent iOS recycling buffer on stall -->
+    <audio id="audioBridge" autoplay playsinline style="display:none;"></audio>
 
 <script>
     // Register Service Worker for PWA
@@ -1742,9 +1756,9 @@ const htmlContent = `
                     else if(m.type==='recordings') window.ui.renderRec(m.data);
                     else if(m.type==='debug_info') window.ui.updDebug(m.data);
                     else if(m.type==='debug_auth_success') {
-                         window.ui.closeModal();
-                         document.getElementById('debugPanel').style.display = 'flex';
-                     }
+                          window.ui.closeModal();
+                          document.getElementById('debugPanel').style.display = 'flex';
+                      }
                     else if(m.type==='error') alert(m.msg);
                 } else this.audio(e.data);
             };
@@ -1850,7 +1864,12 @@ const htmlContent = `
             buf.getChannelData(0).set(f);
 
             const now = audioCtx.currentTime;
-            if (nextStartTime < now) nextStartTime = now;
+            
+            // iOS Fix: If the next start time is in the past (underrun due to network delay or frequency switch),
+            // reset it to now to prevent the browser from trying to catch up (stutter/fast-forward/loop effect).
+            if (nextStartTime < now) {
+                nextStartTime = now + 0.02; // Add tiny buffer
+            }
 
             const s = audioCtx.createBufferSource();
             s.buffer = buf;
@@ -2135,11 +2154,11 @@ const htmlContent = `
                 document.getElementById('addTitle').innerText = target.isFolder ? "Edit Folder" : "Edit Channel";
                 document.getElementById('addName').value = target.title;
                 if (target.isFolder) {
-                     document.getElementById('addFreqGroup').style.display = 'none';
+                      document.getElementById('addFreqGroup').style.display = 'none';
                 } else {
-                     document.getElementById('addFreqGroup').style.display = 'block';
-                     document.getElementById('addFreq').value = target.freq;
-                     this.selAddMod(target.mode);
+                      document.getElementById('addFreqGroup').style.display = 'block';
+                      document.getElementById('addFreq').value = target.freq;
+                      this.selAddMod(target.mode);
                 }
             } else if (type === 'move') {
                 state.moveTargetId = id;
@@ -2294,7 +2313,7 @@ const htmlContent = `
                                   '<div onclick="window.ui.togFreq(\'' + dateGroup.date + '\', \'' + freqGroup.freq + '\')" style="padding:8px 0; font-size:0.9rem; color:var(--acc); font-weight:bold; cursor:pointer; display:flex; align-items:center;">' + 
                                   '<span class="material-symbols-outlined icon '+(isFreqOpen?'rot':'')+'" style="font-size:1rem; margin-right:5px;">chevron_right</span>' +
                                   freqGroup.freq + '</div>';
-                          
+                           
                           if (isFreqOpen) {
                               freqGroup.files.forEach(f => {
                                   html += '<div class="row" style="margin-bottom:2px;">' +
