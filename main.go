@@ -1190,8 +1190,8 @@ const htmlContent = `
 <style>
     :root { --bg: #050507; --panel: rgba(30, 30, 35, 0.7); --acc: #00ffc8; --acc-dim: rgba(0,255,200,0.15); --txt: #fff; --sub: #8b9bb4; --mute: #4a4a4a; --open: #00e676; --stop: #ff3b30; --warn: #ffcc00; }
     body { background: var(--bg); color: var(--txt); font-family: 'Inter', sans-serif; margin: 0; display: flex; justify-content: center; min-height: 100vh; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
-    .app { width: 100%; max-width: 480px; padding: 20px 20px 100px; box-sizing: border-box; padding-bottom: 150px; }
-    .panel { background: var(--panel); backdrop-filter: blur(12px); border-radius: 16px; border: 1px solid rgba(255,255,255,0.08); padding: 20px; margin-bottom: 16px; }
+    .app { width: 100%; max-width: 480px; padding: 20px 20px 100px; box-sizing: border-box; padding-bottom: 150px; position: relative; }
+    .panel { background: var(--panel); backdrop-filter: blur(12px); border-radius: 16px; border: 1px solid rgba(255,255,255,0.08); padding: 20px; margin-bottom: 16px; position: relative; }
     .freq { font-family: 'JetBrains Mono', monospace; font-size: 3.2rem; text-align: center; font-weight: 700; line-height: 1; text-shadow: 0 0 20px var(--acc-dim); margin: 5px 0 0 0; }
     .channel-title { font-family: 'Inter', sans-serif; font-size: 1.2rem; text-align: center; color: var(--acc); font-weight: 600; min-height: 1.5em; text-shadow: 0 0 10px rgba(0,255,200,0.3); margin-top: 10px; }
     .address-display { font-size: 0.8rem; text-align: center; color: var(--sub); margin-bottom: 5px; min-height: 1em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1267,7 +1267,7 @@ const htmlContent = `
     .btn-unlock { background: var(--acc); color:#000; font-weight:bold; padding:8px 16px; border-radius:8px; border:none; cursor:pointer; }
 
     /* Debug Styles */
-    .debug-btn { position: fixed; top: 15px; right: 15px; background: rgba(255,255,255,0.05); border: none; color: var(--sub); padding: 8px; border-radius: 8px; cursor: pointer; z-index: 900; backdrop-filter: blur(5px); }
+    .debug-btn { position: absolute; top: 15px; right: 15px; background: rgba(255,255,255,0.05); border: none; color: var(--sub); padding: 8px; border-radius: 8px; cursor: pointer; z-index: 900; }
     .debug-panel { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(10,10,12,0.95); padding: 15px; border-top: 1px solid #333; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: #aaa; z-index: 2000; display: none; justify-content: space-around; flex-wrap: wrap; }
     .debug-item { text-align: center; margin: 5px; }
     .debug-val { font-size: 1.0rem; color: #fff; font-weight: bold; }
@@ -1276,10 +1276,10 @@ const htmlContent = `
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 </head>
 <body>
-    <button class="debug-btn" onclick="window.ui.toggleDebug()"><span class="material-symbols-outlined">bug_report</span></button>
 
     <div class="app">
         <div class="panel">
+            <button class="debug-btn" onclick="window.ui.toggleDebug()"><span class="material-symbols-outlined">bug_report</span></button>
             <div class="badges">
                 <span class="badge" id="bdgMode">AM</span>
                 <span class="badge" id="bdgAtt" style="display:none">ATT</span>
