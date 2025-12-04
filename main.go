@@ -9,9 +9,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"image"
-	"image/color"
-	"image/png"
+	// "image" - removed
+	// "image/color" - removed
+	// "image/png" - removed
 	"io"
 	"io/fs"
 	"log"
@@ -1356,17 +1356,10 @@ self.addEventListener('fetch', event => {
 `
 
 // Helper to generate a simple icon in memory
-func generateIcon(w http.ResponseWriter, size int) {
-	rect := image.Rect(0, 0, size, size)
-	img := image.NewRGBA(rect)
-	c := color.RGBA{0, 255, 200, 255} // Teal color
-	for y := 0; y < size; y++ {
-		for x := 0; x < size; x++ {
-			img.Set(x, y, c)
-		}
-	}
-	w.Header().Set("Content-Type", "image/png")
-	png.Encode(w, img)
+// Helper to generate a simple icon in memory
+func generateIcon(w http.ResponseWriter, r *http.Request, size int) {
+	url := fmt.Sprintf("https://placehold.co/%dx%d/111/00ffc8?text=SDR", size, size)
+	http.Redirect(w, r, url, http.StatusFound)
 }
 
 func main() {
@@ -1389,10 +1382,10 @@ func main() {
 		w.Write([]byte(swContent))
 	})
 	http.HandleFunc("/icon-192.png", func(w http.ResponseWriter, r *http.Request) {
-		generateIcon(w, 192)
+		generateIcon(w, r, 192)
 	})
 	http.HandleFunc("/icon-512.png", func(w http.ResponseWriter, r *http.Request) {
-		generateIcon(w, 512)
+		generateIcon(w, r, 512)
 	})
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
