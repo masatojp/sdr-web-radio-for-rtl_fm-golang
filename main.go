@@ -1286,6 +1286,10 @@ const htmlContent = `
     .badge { font-size: 0.75rem; padding: 4px 10px; border-radius: 20px; background: rgba(255,255,255,0.05); color: var(--sub); border: 1px solid rgba(255,255,255,0.05); transition: 0.2s; }
     .badge-sql { background: var(--mute); color: #ccc; }
     .badge-sql.open { background: var(--open); color: #000; box-shadow: 0 0 10px var(--open); font-weight: bold; }
+    /* Debug button integrated into badges row */
+    .debug-badge { cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 4px 8px; }
+    .debug-badge:hover { background: rgba(255,255,255,0.1); }
+    
     .meter-wrap { position: relative; height: 32px; margin-top: 15px; border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; overflow: hidden; background: #111; }
     .meter-fill { height: 100%; width: 0%; background: var(--mute); transition: width 0.05s ease-out, background 0.1s; }
     .meter-fill.active { background: var(--open); box-shadow: 0 0 15px var(--open); }
@@ -1354,7 +1358,6 @@ const htmlContent = `
     .btn-unlock { background: var(--acc); color:#000; font-weight:bold; padding:8px 16px; border-radius:8px; border:none; cursor:pointer; }
 
     /* Debug Styles */
-    .debug-btn { position: absolute; top: 15px; right: 15px; background: rgba(255,255,255,0.05); border: none; color: var(--sub); padding: 8px; border-radius: 8px; cursor: pointer; z-index: 900; }
     .debug-panel { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(10,10,12,0.95); padding: 15px; border-top: 1px solid #333; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: #aaa; z-index: 2000; display: none; justify-content: space-around; flex-wrap: wrap; }
     .debug-item { text-align: center; margin: 5px; }
     .debug-val { font-size: 1.0rem; color: #fff; font-weight: bold; }
@@ -1366,12 +1369,15 @@ const htmlContent = `
 
     <div class="app">
         <div class="panel">
-            <button class="debug-btn" onclick="window.ui.toggleDebug()"><span class="material-symbols-outlined" style="font-size: 1.2rem;">bug_report</span></button>
             <div class="badges">
                 <span class="badge" id="bdgMode">AM</span>
                 <span class="badge" id="bdgAtt" style="display:none">ATT</span>
                 <span class="badge badge-sql" id="bdgSql">MUTED</span>
                 <span class="badge" id="bdgConn">👤 0</span>
+                <!-- Debug Badge Button -->
+                <button class="badge debug-badge" onclick="window.ui.toggleDebug()" title="Debug Stats">
+                    <span class="material-symbols-outlined" style="font-size: 0.9rem;">bug_report</span>
+                </button>
             </div>
             <div class="channel-title" id="dspTitle"></div>
             <div class="freq" id="dspFreq">---.---</div>
