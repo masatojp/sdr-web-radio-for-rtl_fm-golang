@@ -63,7 +63,9 @@ type ServerState struct {
 
 type SystemStats struct {
 	CPUTemp   float64 `json:"cpuTemp"`
-	CPUUsage  float64 `json:"cpuUsage"`
+	LoadAvg1  float64 `json:"loadAvg1"`
+	LoadAvg5  float64 `json:"loadAvg5"`
+	LoadAvg15 float64 `json:"loadAvg15"`
 	MemTotal  uint64  `json:"memTotal"`
 	MemUsed   uint64  `json:"memUsed"`
 	DiskTotal uint64  `json:"diskTotal"`
@@ -641,11 +643,13 @@ func getSystemStats() SystemStats {
 		}
 	}
 	
-	// 5. CPU Usage (Simple Calculation based on previous read would be better, but for simplicity just read loadavg)
+	// 5. Load Average
 	if loadavg, err := os.ReadFile("/proc/loadavg"); err == nil {
 		fields := strings.Fields(string(loadavg))
-		if len(fields) > 0 {
-			s.CPUUsage, _ = strconv.ParseFloat(fields[0], 64) // 1min Load Avg
+		if len(fields) >= 3 {
+			s.LoadAvg1, _ = strconv.ParseFloat(fields[0], 64)
+			s.LoadAvg5, _ = strconv.ParseFloat(fields[1], 64)
+			s.LoadAvg15, _ = strconv.ParseFloat(fields[2], 64)
 		}
 	}
 
@@ -1263,16 +1267,16 @@ const htmlContent = `
     .btn-unlock { background: var(--acc); color:#000; font-weight:bold; padding:8px 16px; border-radius:8px; border:none; cursor:pointer; }
 
     /* Debug Styles */
-    .debug-btn { position: absolute; top: 20px; right: 20px; background: rgba(255,255,255,0.05); border: none; color: var(--sub); padding: 8px; border-radius: 8px; cursor: pointer; }
-    .debug-panel { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(10,10,12,0.95); padding: 15px; border-top: 1px solid #333; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: #aaa; z-index: 2000; display: none; justify-content: space-around; }
-    .debug-item { text-align: center; }
-    .debug-val { font-size: 1.2rem; color: #fff; font-weight: bold; }
+    .debug-btn { position: fixed; top: 15px; right: 15px; background: rgba(255,255,255,0.05); border: none; color: var(--sub); padding: 8px; border-radius: 8px; cursor: pointer; z-index: 900; backdrop-filter: blur(5px); }
+    .debug-panel { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(10,10,12,0.95); padding: 15px; border-top: 1px solid #333; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: #aaa; z-index: 2000; display: none; justify-content: space-around; flex-wrap: wrap; }
+    .debug-item { text-align: center; margin: 5px; }
+    .debug-val { font-size: 1.0rem; color: #fff; font-weight: bold; }
 </style>
 <!-- Leaflet JS -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 </head>
 <body>
-    <button class="debug-btn" onclick="window.ui.modal('auth_debug')"><span class="material-symbols-outlined">bug_report</span></button>
+    <button class="debug-btn" onclick="window.ui.toggleDebug()"><span class="material-symbols-outlined">bug_report</span></button>
 
     <div class="app">
         <div class="panel">
@@ -1351,8 +1355,16 @@ const htmlContent = `
             <div>CPU TEMP</div>
         </div>
         <div class="debug-item">
-            <div class="debug-val" id="dbgCpu">--%</div>
-            <div>LOAD</div>
+            <div class="debug-val" id="dbgLoad1">--</div>
+            <div>LOAD 1m</div>
+        </div>
+        <div class="debug-item">
+            <div class="debug-val" id="dbgLoad5">--</div>
+            <div>LOAD 5m</div>
+        </div>
+        <div class="debug-item">
+            <div class="debug-val" id="dbgLoad15">--</div>
+            <div>LOAD 15m</div>
         </div>
         <div class="debug-item">
             <div class="debug-val" id="dbgMem">--%</div>
@@ -1761,7 +1773,9 @@ const htmlContent = `
 
         updDebug(d) {
             document.getElementById('dbgTemp').innerText = d.cpuTemp.toFixed(1) + '°C';
-            document.getElementById('dbgCpu').innerText = (d.cpuUsage * 100).toFixed(1) + '%';
+            document.getElementById('dbgLoad1').innerText = d.loadAvg1.toFixed(2);
+            document.getElementById('dbgLoad5').innerText = d.loadAvg5.toFixed(2);
+            document.getElementById('dbgLoad15').innerText = d.loadAvg15.toFixed(2);
             const memPct = (d.memUsed / d.memTotal) * 100;
             document.getElementById('dbgMem').innerText = memPct.toFixed(1) + '%';
             const diskPct = (d.diskUsed / d.diskTotal) * 100;
@@ -1770,6 +1784,15 @@ const htmlContent = `
         
         renderSq(v) { this.els.sq.style.left = v + '%'; this.els.valSq.innerText = v; },
         adjSq(delta) { let n = state.squelch + delta; if (n < 0) n = 0; if (n > 100) n = 100; state.squelch = n; this.renderSq(n); window.ws.sendSq(n); this.updateMediaMetadata(); },
+        
+        toggleDebug() {
+            const panel = document.getElementById('debugPanel');
+            if (panel.style.display === 'flex') {
+                panel.style.display = 'none';
+            } else {
+                this.modal('auth_debug');
+            }
+        },
         
         togEdit() {
             state.editMode = !state.editMode;
