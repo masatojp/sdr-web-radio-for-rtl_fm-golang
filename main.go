@@ -1276,6 +1276,45 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 // 11. Main & HTML Content
 // ==========================================
 
+func manifestHandler(w http.ResponseWriter, r *http.Request) {
+    w.Header().Set("Content-Type", "application/json")
+    w.Write([]byte(`{
+        "name": "SDR Commander",
+        "short_name": "SDR Cmd",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#050507",
+        "theme_color": "#050507",
+        "icons": [
+            {
+                "src": "https://placehold.co/192x192/111/00ffc8?text=SDR",
+                "sizes": "192x192",
+                "type": "image/png"
+            },
+            {
+                "src": "https://placehold.co/512x512/111/00ffc8?text=SDR",
+                "sizes": "512x512",
+                "type": "image/png"
+            }
+        ]
+    }`))
+}
+
+func swHandler(w http.ResponseWriter, r *http.Request) {
+    w.Header().Set("Content-Type", "application/javascript")
+    w.Write([]byte(`
+        self.addEventListener('install', (e) => {
+            self.skipWaiting();
+        });
+        self.addEventListener('activate', (e) => {
+            e.waitUntil(self.clients.claim());
+        });
+        self.addEventListener('fetch', (e) => {
+            e.respondWith(fetch(e.request));
+        });
+    `))
+}
+
 func main() {
 	flag.Parse()
 
@@ -1311,6 +1350,10 @@ func main() {
 		http.NotFound(w, r)
 	})
 
+    // PWA Handlers
+    http.HandleFunc("/manifest.json", manifestHandler)
+    http.HandleFunc("/sw.js", swHandler)
+
 	http.HandleFunc("/ws", wsHandler)
 
 	go sdrManager()
@@ -1335,7 +1378,10 @@ const htmlContent = `
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#050507">
 <title>SDR COMMANDER</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="https://placehold.co/192x192/111/00ffc8?text=SDR">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@700&display=swap">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
 <!-- Leaflet CSS -->
@@ -1627,7 +1673,8 @@ const htmlContent = `
     let map, marker;
     const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false, moveTargetId: null, gpsUnlocked: false, deleteTarget: null, audioRunning: false };
     let nextStartTime = 0; 
-    
+    let keepAliveOsc = null;
+
     // WebSocket Definition
     window.ws = {
         c: null,
@@ -1751,10 +1798,7 @@ const htmlContent = `
             buf.getChannelData(0).set(f);
 
             const now = audioCtx.currentTime;
-            
             // Jitter Buffer for iOS Background Throttling
-            // iOS sleeps the JS thread, causing bursts of packets.
-            // We need a small buffer to prevent underruns (robotic sound).
             if (nextStartTime < now) {
                 nextStartTime = now + 0.04; // 40ms buffer
             }
@@ -1778,6 +1822,11 @@ const htmlContent = `
         addType: 'freq',
 
         init() {
+            // Register Service Worker
+            if ('serviceWorker' in navigator) {
+                navigator.serviceWorker.register('/sw.js');
+            }
+
             if (window.ws) { window.ws.connect(); } 
             
             // Map Init
@@ -1794,13 +1843,8 @@ const htmlContent = `
             // Media Session Logic
             if ('mediaSession' in navigator) {
                 const ms = navigator.mediaSession;
-                // Important: Ensure play/pause keeps the context running
-                ms.setActionHandler('play', () => {
-                    this.togAudio(); 
-                });
-                ms.setActionHandler('pause', () => {
-                    this.togAudio();
-                });
+                ms.setActionHandler('play', () => this.togAudio());
+                ms.setActionHandler('pause', () => this.togAudio());
                 ms.setActionHandler('stop', () => this.togAudio());
                 ms.setActionHandler('previoustrack', () => {
                     const newFreq = state.freq - 100000;
@@ -1812,7 +1856,7 @@ const htmlContent = `
                 });
             }
 
-            // Resume Audio Context on visibility change (redundancy)
+            // Resume Audio Context on visibility change
             document.addEventListener('visibilitychange', () => {
                 if (document.visibilityState === 'visible') {
                     if (state.audioRunning && audioCtx && audioCtx.state === 'suspended') {
