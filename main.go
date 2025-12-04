@@ -2019,7 +2019,7 @@ const htmlContent = `
                 album: 'SDR Commander',
                 artwork: [
                     { src: 'https://placehold.co/512x512/111/00ffc8?text=SDR', sizes: '512x512', type: 'image/png' },
-                    { src: 'https://placehold.co/192x192/111/00ffc8?text=SDR'+state.mode, sizes: '192x192', type: 'image/png' }
+                    { src: 'https://placehold.co/192x192/111/00ffc8?text=SDR', sizes: '192x192', type: 'image/png' }
                 ]
             });
         },
