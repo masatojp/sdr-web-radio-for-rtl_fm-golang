@@ -1870,7 +1870,7 @@ const htmlContent = `
             // Resume audio bridge if it was auto-paused
             // Resume audio bridge if it was auto-paused
             if (state.autoPaused) {
-                // No need to call play() as we never paused
+                if (window.audioGain) window.audioGain.gain.value = 1.0; // Unmute
                 state.autoPaused = false;
                 nextStartTime = 0; // Force reset
             }
@@ -1968,11 +1968,16 @@ const htmlContent = `
                 audioCtx = new Ctx({ latencyHint: 'playback' }); 
                 
                 const dest = audioCtx.createMediaStreamDestination();
+                
+                // Create GainNode for muting without stopping the engine
+                window.audioGain = audioCtx.createGain();
+                window.audioGain.connect(dest);
+                
                 const audioEl = document.getElementById('audioBridge');
                 audioEl.srcObject = dest.stream;
                 
                 audioEl.play().catch(e => console.warn(e));
-                window.audioDest = dest;
+                window.audioDest = window.audioGain; // Connect sources to GainNode
                 
                 this.updateBtnState('running');
                 this.updateMediaMetadata();
@@ -1996,16 +2001,10 @@ const htmlContent = `
 
         stopAudioPipeline() {
             // Called when tuning or signal lost to prevent looping
-            // Instead of pausing (which kills background playback on Android), we feed silence
-            if (audioCtx && audioCtx.state === 'running') {
+            // Use GainNode to mute instead of pausing or scheduling silence
+            if (audioCtx && audioCtx.state === 'running' && window.audioGain) {
                 state.autoPaused = true;
-                // Create 0.5s silent buffer
-                const buf = audioCtx.createBuffer(1, 24000 * 0.5, 24000);
-                const s = audioCtx.createBufferSource();
-                s.buffer = buf;
-                if (window.audioDest) s.connect(window.audioDest);
-                else s.connect(audioCtx.destination);
-                s.start();
+                window.audioGain.gain.value = 0.0; // Mute
                 // Reset nextStartTime so when real audio comes back, it starts fresh
                 nextStartTime = 0;
             }
