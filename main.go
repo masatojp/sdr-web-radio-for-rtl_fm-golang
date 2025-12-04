@@ -153,6 +153,7 @@ type AudioDSP struct {
 	agcGain     float64
 	squelchGate float64
 	rms         float64
+	outBuf      []byte
 }
 
 func NewAudioDSP() *AudioDSP {
@@ -176,16 +177,17 @@ type ProcessResult struct {
 
 func (d *AudioDSP) Process(input []byte, threshold int) ProcessResult {
 	numSamples := len(input) / 2
-	outBuf := new(bytes.Buffer)
+	if cap(d.outBuf) < len(input) {
+		d.outBuf = make([]byte, len(input))
+	}
+	d.outBuf = d.outBuf[:len(input)]
 
 	sqThresh := float64(threshold) / 100.0
 	var sumSq float64 = 0
 
-	reader := bytes.NewReader(input)
-
 	for i := 0; i < numSamples; i++ {
-		var rawInt int16
-		binary.Read(reader, binary.LittleEndian, &rawInt)
+		// Optimized reading: avoid binary.Read
+		rawInt := int16(binary.LittleEndian.Uint16(input[i*2 : i*2+2]))
 
 		s := float64(rawInt) / 32768.0
 
@@ -226,7 +228,8 @@ func (d *AudioDSP) Process(input []byte, threshold int) ProcessResult {
 		}
 
 		outInt := int16(p * 32767)
-		binary.Write(outBuf, binary.LittleEndian, outInt)
+		// Optimized writing: avoid binary.Write
+		binary.LittleEndian.PutUint16(d.outBuf[i*2:i*2+2], uint16(outInt))
 
 		sumSq += s * s
 	}
@@ -246,7 +249,7 @@ func (d *AudioDSP) Process(input []byte, threshold int) ProcessResult {
 	rssi := int16(math.Min(100, math.Floor(math.Sqrt(d.rms)*500)))
 
 	return ProcessResult{
-		Buffer: outBuf.Bytes(),
+		Buffer: d.outBuf,
 		RSSI:   rssi,
 		IsOpen: d.squelchGate == 1.0,
 	}
@@ -598,6 +601,7 @@ func sdrManager() {
 		done := make(chan error, 1)
 		go func() {
 			reader := bufio.NewReader(stdout)
+			header := make([]byte, 4)
 			for {
 				n, err := io.ReadFull(reader, buf)
 				if err != nil {
@@ -611,15 +615,14 @@ func sdrManager() {
 
 					res := dsp.Process(buf[:n], sq)
 
-					header := new(bytes.Buffer)
-					binary.Write(header, binary.LittleEndian, res.RSSI)
+					binary.LittleEndian.PutUint16(header[0:], uint16(res.RSSI))
 					isOpenInt := int16(0)
 					if res.IsOpen {
 						isOpenInt = 1
 					}
-					binary.Write(header, binary.LittleEndian, isOpenInt)
+					binary.LittleEndian.PutUint16(header[2:], uint16(isOpenInt))
 
-					packet := append(header.Bytes(), res.Buffer...)
+					packet := append(header, res.Buffer...)
 
 					select {
 					case broadcast <- packet:
@@ -1777,6 +1780,7 @@ const htmlContent = `
             }
         },
         tune(skip=false) {
+            window.ui.stopAudioPipeline();
             let f = state.freq;
             const m = window.ui.modalMode; 
             if(!skip) { const v = parseFloat(document.getElementById('inpFreq').value); if(v) f = Math.floor(v*1e6); }
@@ -1785,6 +1789,7 @@ const htmlContent = `
             window.ui.closeModal();
         },
         tuneDir(f, m, t) {
+            window.ui.stopAudioPipeline();
             const p = document.getElementById('inpPass').value;
             if (!p) {
                 state.freq = Math.floor(f*1e6);
@@ -1845,6 +1850,14 @@ const htmlContent = `
         },
         audio(b) {
             if(!audioCtx || audioCtx.state !== 'running') return;
+
+            // Resume audio bridge if it was paused for tuning
+            if (state.audioPausedForTune) {
+                const el = document.getElementById('audioBridge');
+                if (el) el.play().catch(e=>{});
+                state.audioPausedForTune = false;
+                nextStartTime = 0; // Force reset
+            }
             const dv = new DataView(b);
             const rssi = dv.getInt16(0, true);
             const sqlOpen = dv.getInt16(2, true);
@@ -1961,6 +1974,17 @@ const htmlContent = `
                     document.getElementById('audioBridge').play().catch(()=>{});
                     this.updateMediaMetadata();
                 });
+            }
+        },
+
+        stopAudioPipeline() {
+            // Called when tuning to prevent looping of last buffer on iOS
+            if (audioCtx && audioCtx.state === 'running') {
+                const el = document.getElementById('audioBridge');
+                if (el) {
+                    el.pause();
+                    state.audioPausedForTune = true;
+                }
             }
         },
 
