@@ -1853,15 +1853,16 @@ const htmlContent = `
 
             const now = audioCtx.currentTime;
             
-            // iOS Background Fix:
-            // "Silent Audio Hack" (dummyNode) keeps audioCtx running, so we just need buffer management.
-            // When in background, we allow a LARGER latency buffer (1.0s) to absorb jitter.
-            const latency = document.hidden ? 1.0 : 0.10;
+            // iOS Background Fix & Stutter Prevention:
+            // "Silent Audio Hack" (dummyNode) keeps audioCtx running.
+            // When in background, allow much larger buffer (0.8s) to prevent stutter.
+            const latency = document.hidden ? 0.8 : 0.15;
             
-            // If nextStartTime is in the past (underrun), jump ahead.
-            // If nextStartTime is too far in future (overrun), jump back.
-            // Using a loose tolerance in background prevents skipping.
-            if (nextStartTime < now || nextStartTime > now + (document.hidden ? 5.0 : 0.5)) {
+            // If nextStartTime is way behind (underrun) OR way ahead (overrun/reset)
+            // Stuttering happens when nextStartTime is slightly in the past but we try to schedule on top.
+            // When backgrounded, timers slow down, causing nextStartTime to lag.
+            // We force a reset if the gap is too large.
+            if (nextStartTime < now || nextStartTime > now + 3.0) {
                 nextStartTime = now + latency;
             }
 
@@ -1900,11 +1901,16 @@ const htmlContent = `
                 setTimeout(() => map.invalidateSize(), 100);
             }
             
-            // Reset audio timing when switching visibility
+            // Re-sync logic based on Qiita article + Timing Fix
             document.addEventListener('visibilitychange', () => {
-                if (audioCtx && audioCtx.state === 'running') {
-                      // Force re-sync on visibility change
-                      nextStartTime = 0; 
+                if (document.visibilityState === "hidden") {
+                    if (audioCtx && audioCtx.state === 'running') {
+                        audioCtx.resume();
+                    }
+                }
+                // Force sync when returning to foreground
+                if (document.visibilityState === "visible") {
+                     nextStartTime = 0; 
                 }
             });
             
