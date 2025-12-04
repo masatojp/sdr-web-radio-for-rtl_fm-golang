@@ -927,16 +927,13 @@ func broadcastRecordings() {
 				fname := d.Name()
 
 				// 1. 日付の特定
-				// ファイル名が "YYYY-MM-DD..." で始まっているか確認
 				if len(fname) >= 10 && fname[4] == '-' && fname[7] == '-' {
 					date = fname[:10]
 				} else {
-					// ファイル名から取れなければ最終更新日を使用
 					date = info.ModTime().Format("2006-01-02")
 				}
 
 				// 2. 周波数の特定
-				// "_" で分割して "MHz" を含む部分を探す
 				freq = "Unknown Freq"
 				nameParts := strings.Split(fname, "_")
 				for _, p := range nameParts {
@@ -1350,7 +1347,7 @@ const htmlContent = `
     .btn-unlock { background: var(--acc); color:#000; font-weight:bold; padding:8px 16px; border-radius:8px; border:none; cursor:pointer; }
 
     /* Debug Styles */
-    .debug-btn { position: absolute; top: 15px; right: 15px; background: rgba(255,255,255,0.05); border: none; color: var(--sub); padding: 8px; border-radius: 8px; cursor: pointer; z-index: 900; }
+    .debug-btn { position: absolute; top: 10px; right: 10px; background: rgba(255,255,255,0.1); border: none; color: var(--sub); padding: 6px; border-radius: 6px; cursor: pointer; z-index: 900; }
     .debug-panel { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(10,10,12,0.95); padding: 15px; border-top: 1px solid #333; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: #aaa; z-index: 2000; display: none; justify-content: space-around; flex-wrap: wrap; }
     .debug-item { text-align: center; margin: 5px; }
     .debug-val { font-size: 1.0rem; color: #fff; font-weight: bold; }
@@ -1362,7 +1359,7 @@ const htmlContent = `
 
     <div class="app">
         <div class="panel">
-            <button class="debug-btn" onclick="window.ui.toggleDebug()"><span class="material-symbols-outlined">bug_report</span></button>
+            <button class="debug-btn" onclick="window.ui.toggleDebug()"><span class="material-symbols-outlined" style="font-size: 1.2rem;">bug_report</span></button>
             <div class="badges">
                 <span class="badge" id="bdgMode">AM</span>
                 <span class="badge" id="bdgAtt" style="display:none">ATT</span>
@@ -2070,10 +2067,11 @@ const htmlContent = `
         togDate(date) {
             const id = 'date_' + date;
             if(state.expanded.has(id)) state.expanded.delete(id); else state.expanded.add(id);
-            // re-render recordings is implicitly handled by websocket updates usually, but here we might need manual trigger or just wait for next update.
-            // For simplicity, let's just re-request or rely on the fact that 'renderRec' uses 'state.expanded' if we pass the same data.
-            // But 'renderRec' is called with data from server. We need to store that data.
-            // Let's store recData in state
+            if (state.recData) this.renderRec(state.recData);
+        },
+        togFreq(date, freq) {
+            const id = 'freq_' + date + '_' + freq;
+            if(state.expanded.has(id)) state.expanded.delete(id); else state.expanded.add(id);
             if (state.recData) this.renderRec(state.recData);
         },
         renderRec(list) {
@@ -2081,33 +2079,40 @@ const htmlContent = `
             let html = '';
             list.forEach(dateGroup => {
                 const dateId = 'date_' + dateGroup.date;
-                const isOpen = state.expanded.has(dateId);
+                const isDateOpen = state.expanded.has(dateId);
                 
                 html += '<div class="row" onclick="window.ui.togDate(\'' + dateGroup.date + '\')" style="background:rgba(255,255,255,0.08); margin-top:5px;">' +
                         '<div class="row-click-area">' +
-                             '<span class="material-symbols-outlined icon '+(isOpen?'rot':'')+'">chevron_right</span>' +
+                             '<span class="material-symbols-outlined icon '+(isDateOpen?'rot':'')+'">chevron_right</span>' +
                              '<span style="font-weight:800; margin-left:10px;">' + dateGroup.date + '</span>' +
                         '</div></div>';
                 
-                if (isOpen) {
+                if (isDateOpen) {
                     dateGroup.freqs.forEach(freqGroup => {
+                         const freqId = 'freq_' + dateGroup.date + '_' + freqGroup.freq;
+                         const isFreqOpen = state.expanded.has(freqId);
+
                          html += '<div style="margin-left:15px; border-left:2px solid rgba(255,255,255,0.1); padding-left:10px;">' +
-                                 '<div style="padding:8px 0; font-size:0.9rem; color:var(--acc); font-weight:bold;">' + freqGroup.freq + '</div>';
+                                 '<div onclick="window.ui.togFreq(\'' + dateGroup.date + '\', \'' + freqGroup.freq + '\')" style="padding:8px 0; font-size:0.9rem; color:var(--acc); font-weight:bold; cursor:pointer; display:flex; align-items:center;">' + 
+                                 '<span class="material-symbols-outlined icon '+(isFreqOpen?'rot':'')+'" style="font-size:1rem; margin-right:5px;">chevron_right</span>' +
+                                 freqGroup.freq + '</div>';
                          
-                         freqGroup.files.forEach(f => {
-                             html += '<div class="row" style="margin-bottom:2px;">' +
-                                    '<div class="row-click-area">' +
-                                        '<div class="txt">' +
-                                            '<span style="font-weight:600; font-size:0.85rem; word-break:break-all;">'+f.name+'</span>' +
-                                            '<span class="sub">'+(f.size/1024/1024).toFixed(2)+' MB</span>' +
+                         if (isFreqOpen) {
+                             freqGroup.files.forEach(f => {
+                                 html += '<div class="row" style="margin-bottom:2px;">' +
+                                        '<div class="row-click-area">' +
+                                            '<div class="txt">' +
+                                                '<span style="font-weight:600; font-size:0.85rem; word-break:break-all;">'+f.name+'</span>' +
+                                                '<span class="sub">'+(f.size/1024/1024).toFixed(2)+' MB</span>' +
+                                            '</div>' +
                                         '</div>' +
-                                    '</div>' +
-                                    '<div class="act">' +
-                                        '<a href="/download/'+f.path+'" class="ib" download><span class="material-symbols-outlined">download</span></a>' +
-                                        '<button class="ib ib-del" onclick="window.ws.delRec(\''+f.path+'\')"><span class="material-symbols-outlined">delete</span></button>' +
-                                    '</div>' +
-                                '</div>';
-                         });
+                                        '<div class="act">' +
+                                            '<a href="/download/'+f.path+'" class="ib" download><span class="material-symbols-outlined">download</span></a>' +
+                                            '<button class="ib ib-del" onclick="window.ws.delRec(\''+f.path+'\')"><span class="material-symbols-outlined">delete</span></button>' +
+                                        '</div>' +
+                                    '</div>';
+                             });
+                         }
                          html += '</div>';
                     });
                 }
