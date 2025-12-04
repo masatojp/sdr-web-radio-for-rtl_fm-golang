@@ -912,38 +912,50 @@ func broadcastRecordings() {
 	filepath.WalkDir(RecordingsPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil { return nil }
 		if !d.IsDir() && strings.HasSuffix(d.Name(), ".wav") {
-			// Expected path: recordings/YYYY-MM-DD/xxx.xxxMHz/file.wav
 			rel, _ := filepath.Rel(RecordingsPath, path)
 			parts := strings.Split(rel, string(os.PathSeparator))
 			
+			info, _ := d.Info()
+			var date, freq string
+
 			if len(parts) >= 3 {
-				date := parts[0]
-				freq := parts[1]
-				fname := parts[2]
-				
-				info, _ := d.Info()
-				
-				if dateMap[date] == nil {
-					dateMap[date] = make(map[string][]RecFileEntry)
-				}
-				dateMap[date][freq] = append(dateMap[date][freq], RecFileEntry{
-					Name: fname,
-					Path: rel, // Relative path for deletion/download
-					Size: info.Size(),
-				})
+				// 既にフォルダ分けされている場合: recordings/YYYY-MM-DD/xxx.xxxMHz/file.wav
+				date = parts[0]
+				freq = parts[1]
 			} else {
-				// Fallback for old flat files or unexpected structure
-				// Put them in "Uncategorized"
-				if dateMap["Uncategorized"] == nil {
-					dateMap["Uncategorized"] = make(map[string][]RecFileEntry)
+				// ルートにあるファイルなどを解析して分類
+				fname := d.Name()
+
+				// 1. 日付の特定
+				// ファイル名が "YYYY-MM-DD..." で始まっているか確認
+				if len(fname) >= 10 && fname[4] == '-' && fname[7] == '-' {
+					date = fname[:10]
+				} else {
+					// ファイル名から取れなければ最終更新日を使用
+					date = info.ModTime().Format("2006-01-02")
 				}
-				info, _ := d.Info()
-				dateMap["Uncategorized"]["_"] = append(dateMap["Uncategorized"]["_"], RecFileEntry{
-					Name: d.Name(),
-					Path: d.Name(),
-					Size: info.Size(),
-				})
+
+				// 2. 周波数の特定
+				// "_" で分割して "MHz" を含む部分を探す
+				freq = "Unknown Freq"
+				nameParts := strings.Split(fname, "_")
+				for _, p := range nameParts {
+					if strings.Contains(p, "MHz") {
+						freq = p
+						break
+					}
+				}
 			}
+
+			if dateMap[date] == nil {
+				dateMap[date] = make(map[string][]RecFileEntry)
+			}
+			
+			dateMap[date][freq] = append(dateMap[date][freq], RecFileEntry{
+				Name: d.Name(),
+				Path: rel, // 相対パス（ダウンロード・削除用）
+				Size: info.Size(),
+			})
 		}
 		return nil
 	})
