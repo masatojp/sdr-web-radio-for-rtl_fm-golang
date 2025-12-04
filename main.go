@@ -1872,7 +1872,7 @@ const htmlContent = `
             // iOS Fix: If the next start time is in the past (underrun due to network delay or frequency switch),
             // reset it to now to prevent the browser from trying to catch up (stutter/fast-forward/loop effect).
             if (nextStartTime < now) {
-                nextStartTime = now + 0.1; // Add larger buffer
+                nextStartTime = now + 0.3; // Increase buffer for stability
             }
 
             const s = audioCtx.createBufferSource();
@@ -1939,7 +1939,7 @@ const htmlContent = `
             const btn = document.getElementById('btnAudio');
             if (!audioCtx) {
                 const Ctx = window.AudioContext || window.webkitAudioContext;
-                audioCtx = new Ctx({ latencyHint: 'interactive' }); 
+                audioCtx = new Ctx({ latencyHint: 'playback' }); 
                 
                 const dest = audioCtx.createMediaStreamDestination();
                 const audioEl = document.getElementById('audioBridge');
