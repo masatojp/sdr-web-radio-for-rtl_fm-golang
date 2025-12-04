@@ -1704,7 +1704,8 @@ const htmlContent = `
         </div>
     </div>
 
-    <audio id="audioBridge" autoplay playsinline loop style="display:none;"></audio>
+    <!-- Hidden audio element for iOS PWA background play workaround -->
+    <audio id="audioBridge" autoplay playsinline preload="auto" controls style="opacity:0; pointer-events:none; position:absolute; left:-9999px;"></audio>
 
 <script>
     if ('serviceWorker' in navigator) {
@@ -1719,6 +1720,7 @@ const htmlContent = `
     let map, marker;
     const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false, moveTargetId: null, gpsUnlocked: false, deleteTarget: null };
     let nextStartTime = 0; 
+    let keepAliveOsc = null; // iOS keep-alive oscillator
 
     // WebSocket Definition
     window.ws = {
@@ -1823,7 +1825,13 @@ const htmlContent = `
             document.getElementById('inpDeletePass').value = ''; // clear
         },
         audio(b) {
-            if(!audioCtx || audioCtx.state !== 'running') return;
+            if(!audioCtx) return;
+            
+            // Resume context if suspended (common iOS issue after interruption)
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+
             const dv = new DataView(b);
             const rssi = dv.getInt16(0, true);
             const sqlOpen = dv.getInt16(2, true);
@@ -1843,7 +1851,12 @@ const htmlContent = `
             buf.getChannelData(0).set(f);
 
             const now = audioCtx.currentTime;
-            if (nextStartTime < now) nextStartTime = now;
+            
+            // Sync logic strict check: If nextStartTime is too far behind (lag/background) or too far ahead (buffer buildup)
+            // Reset to now to prevent loops/stuttering
+            if (nextStartTime < now - 0.1 || nextStartTime > now + 0.5) {
+                nextStartTime = now;
+            }
 
             const s = audioCtx.createBufferSource();
             s.buffer = buf;
@@ -1905,24 +1918,43 @@ const htmlContent = `
             }
         },
 
-        togAudio() {
+        async togAudio() {
             const btn = document.getElementById('btnAudio');
             if (!audioCtx) {
                 const Ctx = window.AudioContext || window.webkitAudioContext;
                 audioCtx = new Ctx({ latencyHint: 'interactive' }); 
                 
+                // Destination for <audio> element
                 const dest = audioCtx.createMediaStreamDestination();
                 const audioEl = document.getElementById('audioBridge');
                 audioEl.srcObject = dest.stream;
-                
-                audioEl.play().catch(e => console.warn(e));
                 window.audioDest = dest;
-                
+
+                // 1. Play audio element to start session
+                try {
+                    await audioEl.play();
+                } catch(e) { console.warn('Audio play failed', e); }
+
+                // 2. Setup Keep-Alive Oscillator (Direct to Destination)
+                // This forces the AudioContext to stay active even if no data is coming from WS
                 const osc = audioCtx.createOscillator();
                 const g = audioCtx.createGain();
-                osc.connect(g); g.connect(dest); g.connect(audioCtx.destination);
-                osc.frequency.value = 20; g.gain.value = 0.001;
+                osc.connect(g); 
+                g.connect(audioCtx.destination); // Direct hardware connection
+                osc.frequency.value = 20; 
+                g.gain.value = 0.0001; // Tiny non-zero gain
                 osc.start();
+                keepAliveOsc = osc;
+
+                // 3. Setup Dummy stream for <audio> tag input
+                // Ensures the stream for the audio tag is never "empty"
+                const osc2 = audioCtx.createOscillator();
+                const g2 = audioCtx.createGain();
+                osc2.connect(g2);
+                g2.connect(dest);
+                osc2.frequency.value = 20;
+                g2.gain.value = 0.0001;
+                osc2.start();
                 
                 this.updateBtnState('running');
                 this.updateMediaMetadata();
@@ -1937,8 +1969,8 @@ const htmlContent = `
                 });
             } else {
                 audioCtx.resume().then(() => {
-                    this.updateBtnState('running');
                     document.getElementById('audioBridge').play().catch(()=>{});
+                    this.updateBtnState('running');
                     this.updateMediaMetadata();
                 });
             }
