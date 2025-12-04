@@ -1752,8 +1752,13 @@ const htmlContent = `
             buf.getChannelData(0).set(f);
 
             const now = audioCtx.currentTime;
-            // Prevent lag buildup if background throttles execution
-            if (nextStartTime < now) nextStartTime = now;
+            
+            // Jitter Buffer for iOS Background Throttling
+            // iOS sleeps the JS thread, causing bursts of packets.
+            // We need a small buffer to prevent underruns (robotic sound).
+            if (nextStartTime < now) {
+                nextStartTime = now + 0.04; // 40ms buffer
+            }
 
             const s = audioCtx.createBufferSource();
             s.buffer = buf;
@@ -1790,8 +1795,13 @@ const htmlContent = `
             // Media Session Logic
             if ('mediaSession' in navigator) {
                 const ms = navigator.mediaSession;
-                ms.setActionHandler('play', () => this.togAudio());
-                ms.setActionHandler('pause', () => this.togAudio());
+                // Important: Ensure play/pause keeps the context running
+                ms.setActionHandler('play', () => {
+                    this.togAudio(); 
+                });
+                ms.setActionHandler('pause', () => {
+                    this.togAudio();
+                });
                 ms.setActionHandler('stop', () => this.togAudio());
                 ms.setActionHandler('previoustrack', () => {
                     const newFreq = state.freq - 100000;
@@ -1803,7 +1813,7 @@ const htmlContent = `
                 });
             }
 
-            // Visibility Change Handler to Resume Audio Context
+            // Resume Audio Context on visibility change (redundancy)
             document.addEventListener('visibilitychange', () => {
                 if (document.visibilityState === 'visible') {
                     if (state.audioRunning && audioCtx && audioCtx.state === 'suspended') {
@@ -1836,7 +1846,7 @@ const htmlContent = `
                         console.log('Wake Lock released');
                     });
                 } catch (err) {
-                    console.error(err.name + ", " + err.message); // FIXED: Removed backticks inside backticks
+                    console.error(err.name + ", " + err.message);
                 }
             }
         },
@@ -1849,22 +1859,13 @@ const htmlContent = `
                 const Ctx = window.AudioContext || window.webkitAudioContext;
                 audioCtx = new Ctx({ latencyHint: 'playback' }); 
                 
-                // Create MediaStreamDestination to link Web Audio API to HTML5 Audio Element
-                // This is crucial for iOS background audio
                 const dest = audioCtx.createMediaStreamDestination();
                 window.audioDest = dest;
 
                 const audioEl = document.getElementById('audioBridge');
                 audioEl.srcObject = dest.stream;
                 
-                // Ensure audio element plays to trigger background capability
-                try {
-                    await audioEl.play();
-                } catch (e) {
-                    console.warn("Audio Element Play Error:", e);
-                }
-                
-                // "Keep Alive" Oscillator: Plays inaudible sound to prevent DSP suspension
+                // Keep Alive Oscillator
                 const osc = audioCtx.createOscillator();
                 const g = audioCtx.createGain();
                 osc.connect(g); 
@@ -1875,6 +1876,11 @@ const htmlContent = `
                 osc.start();
                 keepAliveOsc = osc;
                 
+                // Force audio element play synchronously (best for iOS)
+                audioEl.play().then(() => {
+                    console.log("Audio Element Started");
+                }).catch(e => console.warn("Audio Element Play Error:", e));
+
                 state.audioRunning = true;
                 this.updateBtnState('running');
                 this.updateMediaMetadata();
@@ -1895,11 +1901,13 @@ const htmlContent = `
                     if('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
                 });
             } else {
+                // Resume logic
+                const audioEl = document.getElementById('audioBridge');
+                audioEl.play().catch(()=>{});
+                
                 audioCtx.resume().then(() => {
                     state.audioRunning = true;
                     this.updateBtnState('running');
-                    const audioEl = document.getElementById('audioBridge');
-                    audioEl.play().catch(()=>{});
                     this.updateMediaMetadata();
                     this.requestWakeLock();
                 });
