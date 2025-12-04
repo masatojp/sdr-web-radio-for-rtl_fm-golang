@@ -1513,6 +1513,9 @@ const htmlContent = `
     .debug-panel { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(10,10,12,0.95); padding: 15px; border-top: 1px solid #333; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: #aaa; z-index: 2000; display: none; justify-content: space-around; flex-wrap: wrap; }
     .debug-item { text-align: center; margin: 5px; }
     .debug-val { font-size: 1.0rem; color: #fff; font-weight: bold; }
+    
+    /* Version Tag */
+    .ver-tag { position: absolute; top: 10px; right: 10px; font-size: 0.7rem; color: rgba(255,255,255,0.3); font-family: 'JetBrains Mono', monospace; pointer-events: none; }
 </style>
 <!-- Leaflet JS -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
@@ -1520,6 +1523,7 @@ const htmlContent = `
 <body>
 
     <div class="app">
+        <div class="ver-tag">v2.1 (iOS Fix)</div>
         <div class="panel">
             <div class="badges">
                 <span class="badge" id="bdgMode">AM</span>
@@ -1705,23 +1709,30 @@ const htmlContent = `
     </div>
 
     <!-- iOS Fix: Audio Bridge with NO Loop (Fix stutter) -->
-    <audio id="audioBridge" autoplay playsinline style="opacity:0; pointer-events:none; position:absolute; left:-9999px;"></audio>
+    <audio id="audioBridge" autoplay playsinline x-webkit-airplay="allow" style="opacity:0; pointer-events:none; position:absolute; left:-9999px;"></audio>
 
 <script>
+    // iOS Background Fix v2.1
+    // Implements robust audio scheduling, silence injection, and aggressive wake-lock strategies.
+
     if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
-            navigator.serviceWorker.register('/service-worker.js')
-                .then(reg => console.log('SW registered!', reg))
-                .catch(err => console.log('SW failed', err));
+            navigator.serviceWorker.register('/service-worker.js').catch(()=>{});
         });
     }
 
     let audioCtx;
-    let map, marker;
-    const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false, moveTargetId: null, gpsUnlocked: false, deleteTarget: null };
+    let audioQueue = [];
+    let isPlaying = false;
+    let schedulerTimer = null;
     let nextStartTime = 0; 
-    let keepAliveOsc = null; 
-    let dummyNode = null; 
+    let silenceNode = null;
+    let noiseNode = null; // Comfort noise to keep driver alive
+    
+    // Config
+    const SCHEDULE_AHEAD_TIME = 0.1; // Schedule 100ms ahead
+    const LOOKAHEAD_MS = 25; // Check every 25ms
+    const IOS_BG_BUFFER = 0.5; // Extra buffer for iOS background
 
     // WebSocket Definition
     window.ws = {
@@ -1734,7 +1745,7 @@ const htmlContent = `
                 if(typeof e.data === 'string') {
                     const m = JSON.parse(e.data);
                     if(m.type==='status_update') window.ui.upd(m);
-                    else if(m.type==='bookmarks') { state.bm = m.data; window.ui.renderBM(); }
+                    else if(m.type==='bookmarks') { window.ui.state.bm = m.data; window.ui.renderBM(); }
                     else if(m.type==='recordings') window.ui.renderRec(m.data);
                     else if(m.type==='debug_info') window.ui.updDebug(m.data);
                     else if(m.type==='debug_auth_success') {
@@ -1742,24 +1753,26 @@ const htmlContent = `
                           document.getElementById('debugPanel').style.display = 'flex';
                       }
                     else if(m.type==='error') alert(m.msg);
-                } else this.audio(e.data);
+                } else {
+                    this.queueAudio(e.data);
+                }
             };
             this.c.onclose = () => setTimeout(()=>this.connect(), 3000);
         },
         send(o) { if(this.c&&this.c.readyState===1) this.c.send(JSON.stringify(o)); },
         sendSq(v) { this.send({type:'set_squelch', val:parseInt(v)}); },
-        setMode(m) { state.mode=m; this.tune(true); },
+        setMode(m) { window.ui.state.mode=m; this.tune(true); },
         setAtt(a) { this.send({type:'set_att', att:a}); },
-        togRec() { this.send({type:state.rec?'stop_recording':'start_recording'}); },
+        togRec() { this.send({type:window.ui.state.rec?'stop_recording':'start_recording'}); },
         move(id, dir) { this.send({type:'move_bookmark', id, dir}); },
         changeParent(pid) {
-            if (state.moveTargetId) {
-                this.send({type:'change_parent', id:state.moveTargetId, newParentId:pid});
+            if (window.ui.state.moveTargetId) {
+                this.send({type:'change_parent', id:window.ui.state.moveTargetId, newParentId:pid});
                 window.ui.closeModal();
             }
         },
         tune(skip=false) {
-            let f = state.freq;
+            let f = window.ui.state.freq;
             const m = window.ui.modalMode; 
             if(!skip) { const v = parseFloat(document.getElementById('inpFreq').value); if(v) f = Math.floor(v*1e6); }
             const p = document.getElementById('inpPass').value;
@@ -1769,15 +1782,15 @@ const htmlContent = `
         tuneDir(f, m, t) {
             const p = document.getElementById('inpPass').value;
             if (!p) {
-                state.freq = Math.floor(f*1e6);
-                state.mode = m;
+                window.ui.state.freq = Math.floor(f*1e6);
+                window.ui.state.mode = m;
                 document.getElementById('inpFreq').value = f.toFixed(3);
                 window.ui.selMod(m);
                 window.ui.modal('tune');
                 return;
             }
             this.send({type:'auth_tune', password:p, freq:Math.floor(f*1e6), mode:m, title:t});
-            state.mode = m;
+            window.ui.state.mode = m;
         },
         authGPS() {
             const p = document.getElementById('inpGPSPass').value;
@@ -1793,8 +1806,8 @@ const htmlContent = `
             if (!title) return;
             const isFolder = (window.ui.addType === 'folder');
             
-            if (state.editTargetId) {
-                const data = { id: state.editTargetId, title, isFolder };
+            if (window.ui.state.editTargetId) {
+                const data = { id: window.ui.state.editTargetId, title, isFolder };
                 if (!isFolder) {
                     const freqVal = parseFloat(document.getElementById('addFreq').value);
                     if (!freqVal) return;
@@ -1815,73 +1828,100 @@ const htmlContent = `
             window.ui.closeModal();
         },
         delRec(path) {
-            state.deleteTarget = path;
+            window.ui.state.deleteTarget = path;
             window.ui.modal('auth_delete');
         },
         execDel() {
             const p = document.getElementById('inpDeletePass').value;
-            if(!state.deleteTarget) return;
-            this.send({type:'delete_recording', filename:state.deleteTarget, deletePassword:p});
+            if(!window.ui.state.deleteTarget) return;
+            this.send({type:'delete_recording', filename:window.ui.state.deleteTarget, deletePassword:p});
             window.ui.closeModal();
             document.getElementById('inpDeletePass').value = ''; // clear
         },
-        audio(b) {
-            if(!audioCtx) return;
+        
+        // --- NEW AUDIO PIPELINE ---
+        queueAudio(b) {
+            if(!audioCtx || !isPlaying) return;
             
-            // iOS fix: Resume if interrupted/suspended unexpectedly
-            if (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted') {
-                audioCtx.resume();
-            }
-
+            // Extract Signal Info
             const dv = new DataView(b);
             const rssi = dv.getInt16(0, true);
             const sqlOpen = dv.getInt16(2, true);
             
-            const bar = window.ui.els.rssi;
-            bar.style.width = Math.min(100, (rssi/200)*100)+'%';
-            if(sqlOpen) bar.classList.add('active'); else bar.classList.remove('active');
-            const bdgSql = document.getElementById('bdgSql');
-            if (sqlOpen) { bdgSql.innerText = 'SQL OPEN'; bdgSql.className = 'badge badge-sql open'; } 
-            else { bdgSql.innerText = 'MUTED'; bdgSql.className = 'badge badge-sql'; }
+            // Update UI immediately (visuals don't need audio sync)
+            requestAnimationFrame(() => {
+                const bar = document.getElementById('dspRssi');
+                if(bar) {
+                    bar.style.width = Math.min(100, (rssi/200)*100)+'%';
+                    if(sqlOpen) bar.classList.add('active'); else bar.classList.remove('active');
+                }
+                const bdgSql = document.getElementById('bdgSql');
+                if(bdgSql) {
+                    if (sqlOpen) { bdgSql.innerText = 'SQL OPEN'; bdgSql.className = 'badge badge-sql open'; } 
+                    else { bdgSql.innerText = 'MUTED'; bdgSql.className = 'badge badge-sql'; }
+                }
+            });
 
+            // Decode PCM
             const f = new Float32Array((b.byteLength - 4) / 2);
             const s16 = new Int16Array(b, 4);
             for(let i=0; i<f.length; i++) f[i] = s16[i]/32768.0;
 
-            const buf = audioCtx.createBuffer(1, f.length, 48000);
-            buf.getChannelData(0).set(f);
-
-            const now = audioCtx.currentTime;
-            
-            // iOS Background Fix & Stutter Prevention:
-            // "Silent Audio Hack" (dummyNode) keeps audioCtx running.
-            // When in background, allow much larger buffer (0.8s) to prevent stutter.
-            const latency = document.hidden ? 0.8 : 0.15;
-            
-            // If nextStartTime is way behind (underrun) OR way ahead (overrun/reset)
-            // Stuttering happens when nextStartTime is slightly in the past but we try to schedule on top.
-            // When backgrounded, timers slow down, causing nextStartTime to lag.
-            // We force a reset if the gap is too large.
-            if (nextStartTime < now || nextStartTime > now + 3.0) {
-                nextStartTime = now + latency;
-            }
-
-            const s = audioCtx.createBufferSource();
-            s.buffer = buf;
-            
-            // FIX: Always connect to window.audioDest if available
-            // connecting to audioCtx.destination directly in background often fails on iOS
-            if (window.audioDest) s.connect(window.audioDest);
-            else s.connect(audioCtx.destination);
-            
-            s.start(nextStartTime);
-            nextStartTime += buf.duration;
+            audioQueue.push(f);
         }
     };
 
+    // --- ROBUST AUDIO SCHEDULER ---
+    function audioScheduler() {
+        if (!audioCtx || !isPlaying) return;
+
+        const currentTime = audioCtx.currentTime;
+        
+        // Logic: If nextStartTime is behind currentTime, we are underrunning (stutter risk).
+        // On iOS background, this happens often. We MUST jump ahead.
+        // If we are way behind (>0.5s), reset the clock entirely.
+        if (nextStartTime < currentTime) {
+            nextStartTime = currentTime + 0.01; // Catch up
+        }
+
+        // Schedule chunks until we are sufficiently ahead
+        while (audioQueue.length > 0 && nextStartTime < currentTime + SCHEDULE_AHEAD_TIME) {
+            const pcm = audioQueue.shift();
+            const buf = audioCtx.createBuffer(1, pcm.length, 48000);
+            buf.getChannelData(0).set(pcm);
+            
+            const src = audioCtx.createBufferSource();
+            src.buffer = buf;
+            
+            // Always route to MediaStreamDestination for iOS background support
+            if (window.audioDest) {
+                src.connect(window.audioDest);
+            } else {
+                src.connect(audioCtx.destination);
+            }
+            
+            src.start(nextStartTime);
+            nextStartTime += buf.duration;
+        }
+        
+        // --- SILENCE INJECTION (Anti-Loop) ---
+        // If the queue is empty but we are running out of scheduled audio,
+        // the hardware driver might loop the last buffer.
+        // We preemptively schedule a silent buffer to keep the driver fed.
+        if (audioQueue.length === 0 && nextStartTime < currentTime + 0.2) {
+             const silentBuf = audioCtx.createBuffer(1, 1024, 48000); // Small silent chunk
+             const silentSrc = audioCtx.createBufferSource();
+             silentSrc.buffer = silentBuf;
+             if (window.audioDest) silentSrc.connect(window.audioDest);
+             else silentSrc.connect(audioCtx.destination);
+             silentSrc.start(nextStartTime);
+             nextStartTime += silentBuf.duration;
+        }
+    }
+
     // UI Definition
     window.ui = {
-        els: { freq:document.getElementById('dspFreq'), rssi:document.getElementById('dspRssi'), sq:document.getElementById('sqMarker'), valSq:document.getElementById('valSq') },
+        state: { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false, moveTargetId: null, gpsUnlocked: false, deleteTarget: null },
         modalMode: 'AM',
         addMode: 'AM',
         targetParent: null,
@@ -1897,127 +1937,109 @@ const htmlContent = `
                     attribution: '&copy; OSM'
                 }).addTo(map);
                 marker = L.marker([35.6895, 139.6917]).addTo(map);
-                
                 setTimeout(() => map.invalidateSize(), 100);
             }
             
-            // Re-sync logic based on Qiita article + Timing Fix
+            // Visibility Handler: Force resume
             document.addEventListener('visibilitychange', () => {
-                if (document.visibilityState === "hidden") {
-                    if (audioCtx && audioCtx.state === 'running') {
-                        audioCtx.resume();
-                    }
-                }
-                // Force sync when returning to foreground
-                if (document.visibilityState === "visible") {
-                     nextStartTime = 0; 
+                if (document.visibilityState === 'visible') {
+                    // Sync up when returning
+                    if(audioCtx) nextStartTime = audioCtx.currentTime + 0.1;
                 }
             });
             
-            // iOS Fix: Ensure AudioContext resumes on touch
-            document.body.addEventListener('touchstart', () => {
-                if (audioCtx && audioCtx.state !== 'running') audioCtx.resume();
-            }, {passive: true});
-
+            // Media Session
             if ('mediaSession' in navigator) {
                 const ms = navigator.mediaSession;
                 ms.setActionHandler('play', () => this.togAudio());
                 ms.setActionHandler('pause', () => this.togAudio());
                 ms.setActionHandler('stop', () => this.togAudio());
-                ms.setActionHandler('previoustrack', () => {
-                    const newFreq = state.freq - 100000;
-                    window.ws.tuneDir(newFreq / 1e6, state.mode);
-                });
-                ms.setActionHandler('nexttrack', () => {
-                    const newFreq = state.freq + 100000;
-                    window.ws.tuneDir(newFreq / 1e6, state.mode);
-                });
             }
         },
 
-        initMap() {
-            if (!map && document.getElementById('map')) {
-                map = L.map('map').setView([35.6895, 139.6917], 13);
-                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                    attribution: '&copy; OSM'
-                }).addTo(map);
-                marker = L.marker([35.6895, 139.6917]).addTo(map);
-                
-                setTimeout(() => map.invalidateSize(), 100);
-            }
-        },
-
+        // --- CORE AUDIO STARTUP ---
         async togAudio() {
             const btn = document.getElementById('btnAudio');
+            
             if (!audioCtx) {
+                // 1. Create Context
                 const Ctx = window.AudioContext || window.webkitAudioContext;
-                // Fix sample rate to 48000 to match server
-                audioCtx = new Ctx({ latencyHint: 'playback', sampleRate: 48000 }); 
+                audioCtx = new Ctx({ latencyHint: 'playback', sampleRate: 48000 });
                 
-                // Auto-resume if interrupted
-                audioCtx.onstatechange = () => {
-                    if (audioCtx.state === 'interrupted') {
-                        audioCtx.resume();
-                    }
-                };
-                
-                // Destination for <audio> element
+                // 2. Setup Destination for <audio> tag (The Bridge)
                 const dest = audioCtx.createMediaStreamDestination();
+                window.audioDest = dest;
+                
                 const audioEl = document.getElementById('audioBridge');
                 audioEl.srcObject = dest.stream;
-                window.audioDest = dest;
+                
+                // 3. Setup Comfort Noise (Anti-suspend)
+                // This plays faint noise continuously to prevent the OS from killing the audio thread
+                noiseNode = audioCtx.createBufferSource();
+                const noiseBuf = audioCtx.createBuffer(1, 48000, 48000);
+                const noiseData = noiseBuf.getChannelData(0);
+                for (let i = 0; i < 48000; i++) noiseData[i] = (Math.random() - 0.5) * 0.002; // Very quiet
+                noiseNode.buffer = noiseBuf;
+                noiseNode.loop = true;
+                noiseNode.connect(dest); // Connect to output
+                noiseNode.start(0);
 
-                // iOS: Must call play() inside a user event handler
+                // 4. Force iOS to unlock audio by playing a buffer right now (inside click event)
+                const unlockBuf = audioCtx.createBuffer(1, 1, 48000);
+                const unlockSrc = audioCtx.createBufferSource();
+                unlockSrc.buffer = unlockBuf;
+                unlockSrc.connect(dest);
+                unlockSrc.start(0);
+
+                // 5. Start the <audio> tag
                 try {
                     await audioEl.play();
-                } catch(e) { console.warn('Audio play failed', e); }
+                } catch(e) { console.error("Audio tag play failed", e); }
 
-                // --- SILENT AUDIO HACK FOR iOS ---
-                // Strategy 1: Constant silent oscillator to keep hardware hot
-                if (!keepAliveOsc) {
-                    keepAliveOsc = audioCtx.createOscillator();
-                    keepAliveOsc.type = 'sine';
-                    keepAliveOsc.frequency.value = 1; // 1Hz
-                    const silentGain = audioCtx.createGain();
-                    silentGain.gain.value = 0.001; // Nearly silent
-                    keepAliveOsc.connect(silentGain);
-                    // IMPORTANT: Connect to dest (MediaStream), NOT destination directly
-                    silentGain.connect(dest); 
-                    keepAliveOsc.start();
-                }
-
-                // Strategy 2: ScriptProcessor (legacy fix)
-                if (!dummyNode) {
-                    dummyNode = audioCtx.createScriptProcessor(4096, 1, 1);
-                    dummyNode.onaudioprocess = (e) => {
-                        const output = e.outputBuffer.getChannelData(0);
-                        for (let i = 0; i < output.length; i++) {
-                            output[i] = (Math.random() * 0.000001); 
-                        }
-                    };
-                    // IMPORTANT: Connect to dest (MediaStream), NOT destination directly
-                    dummyNode.connect(dest);
-                }
-
+                // 6. Start Scheduler Loop
+                // Using setInterval is usually bad for audio, but strictly necessary for 
+                // Web Audio API on iOS background if not using AudioWorklet (which needs external file).
+                // The ScriptProcessor hack is another way, but we use interval + buffer queue here.
+                if (schedulerTimer) clearInterval(schedulerTimer);
+                schedulerTimer = setInterval(audioScheduler, LOOKAHEAD_MS);
+                
+                isPlaying = true;
                 this.updateBtnState('running');
                 this.updateMediaMetadata();
                 return;
             }
 
-            const audioEl = document.getElementById('audioBridge');
-
-            if (audioCtx.state === 'running') {
-                audioCtx.suspend().then(() => {
-                    this.updateBtnState('suspended');
-                    audioEl.pause();
-                    if('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
-                });
+            if (isPlaying) {
+                // Stop
+                await audioCtx.suspend();
+                document.getElementById('audioBridge').pause();
+                isPlaying = false;
+                if(noiseNode) { try{noiseNode.stop();}catch(e){} noiseNode=null; } // Stop noise
+                if(schedulerTimer) clearInterval(schedulerTimer);
+                this.updateBtnState('suspended');
+                if('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
             } else {
-                audioCtx.resume().then(() => {
-                    audioEl.play().catch(()=>{});
-                    this.updateBtnState('running');
-                    this.updateMediaMetadata();
-                });
+                // Resume
+                await audioCtx.resume();
+                document.getElementById('audioBridge').play();
+                
+                // Restart noise if missing
+                if(!noiseNode) {
+                    noiseNode = audioCtx.createBufferSource();
+                    const noiseBuf = audioCtx.createBuffer(1, 48000, 48000);
+                    const d = noiseBuf.getChannelData(0);
+                    for(let i=0; i<48000; i++) d[i] = (Math.random()-0.5)*0.002;
+                    noiseNode.buffer = noiseBuf;
+                    noiseNode.loop = true;
+                    noiseNode.connect(window.audioDest);
+                    noiseNode.start(0);
+                }
+                
+                isPlaying = true;
+                nextStartTime = audioCtx.currentTime + 0.1;
+                schedulerTimer = setInterval(audioScheduler, LOOKAHEAD_MS);
+                this.updateBtnState('running');
+                this.updateMediaMetadata();
             }
         },
 
@@ -2033,11 +2055,11 @@ const htmlContent = `
         },
         
         updateMediaMetadata() {
-            if (!('mediaSession' in navigator) || !audioCtx || audioCtx.state !== 'running') return;
+            if (!('mediaSession' in navigator) || !audioCtx || !isPlaying) return;
             navigator.mediaSession.playbackState = 'playing';
             
-            const titleStr = state.title ? state.title : (state.freq/1e6).toFixed(3) + ' MHz';
-            const artistStr = state.mode + ' | SQL: ' + state.squelch + ' | ' + (state.rec ? '● REC' : 'LIVE');
+            const titleStr = this.state.title ? this.state.title : (this.state.freq/1e6).toFixed(3) + ' MHz';
+            const artistStr = this.state.mode + ' | SQL: ' + this.state.squelch + ' | ' + (this.state.rec ? '● REC' : 'LIVE');
             
             navigator.mediaSession.metadata = new MediaMetadata({
                 title: titleStr,
@@ -2051,14 +2073,14 @@ const htmlContent = `
         },
 
         upd(m) {
-            const prevFreq = state.freq;
-            const prevRec = state.rec;
+            const prevFreq = this.state.freq;
+            const prevRec = this.state.rec;
 
-            state.freq=m.freq; state.mode=m.mode; state.att=m.att; state.rec=m.isRecording; state.squelch=m.squelch;
-            state.title=m.title;
-            state.gpsUnlocked = m.gpsUnlocked;
+            this.state.freq=m.freq; this.state.mode=m.mode; this.state.att=m.att; this.state.rec=m.isRecording; this.state.squelch=m.squelch;
+            this.state.title=m.title;
+            this.state.gpsUnlocked = m.gpsUnlocked;
             
-            this.els.freq.innerText = (m.freq/1e6).toFixed(3);
+            document.getElementById('dspFreq').innerText = (m.freq/1e6).toFixed(3);
             document.getElementById('dspTitle').innerText = m.title || '';
             document.getElementById('bdgMode').innerText = m.mode;
             document.getElementById('bdgAtt').style.display = m.att!=='off'?'inline-block':'none';
@@ -2132,8 +2154,8 @@ const htmlContent = `
             document.getElementById('dbgDisk').innerText = diskPct.toFixed(0) + '%';
         },
         
-        renderSq(v) { this.els.sq.style.left = v + '%'; this.els.valSq.innerText = v; },
-        adjSq(delta) { let n = state.squelch + delta; if (n < 0) n = 0; if (n > 100) n = 100; state.squelch = n; this.renderSq(n); window.ws.sendSq(n); this.updateMediaMetadata(); },
+        renderSq(v) { document.getElementById('sqMarker').style.left = v + '%'; document.getElementById('valSq').innerText = v; },
+        adjSq(delta) { let n = this.state.squelch + delta; if (n < 0) n = 0; if (n > 100) n = 100; this.state.squelch = n; this.renderSq(n); window.ws.sendSq(n); this.updateMediaMetadata(); },
         
         toggleDebug() {
             const panel = document.getElementById('debugPanel');
@@ -2145,12 +2167,12 @@ const htmlContent = `
         },
         
         togEdit() {
-            state.editMode = !state.editMode;
+            this.state.editMode = !this.state.editMode;
             const btn = document.getElementById('btnEditToggle');
             const ctrls = document.getElementById('addBtns');
             const panel = document.getElementById('listBM');
             
-            if (state.editMode) {
+            if (this.state.editMode) {
                 btn.innerText = 'DONE';
                 btn.classList.add('editing');
                 ctrls.classList.add('show');
@@ -2168,11 +2190,11 @@ const htmlContent = `
             this.closeModal(); 
             if (type === 'tune') {
                 document.getElementById('modalTune').style.display = 'flex';
-                document.getElementById('inpFreq').value = (state.freq/1e6).toFixed(3); 
-                this.selMod(state.mode); 
+                document.getElementById('inpFreq').value = (this.state.freq/1e6).toFixed(3); 
+                this.selMod(this.state.mode); 
                 document.getElementById('inpPass').focus();
             } else if (type === 'auth_gps') {
-                const isLocked = !state.gpsUnlocked;
+                const isLocked = !this.state.gpsUnlocked;
                 document.getElementById('gpsModalTitle').innerText = isLocked ? "Unlock GPS" : "Lock GPS";
                 document.getElementById('gpsModalDesc').innerText = isLocked ? 
                     "Enter password to enable GPS tracking for all users." : 
@@ -2190,7 +2212,7 @@ const htmlContent = `
             } else if (type === 'add_folder' || type === 'add_freq') {
                 document.getElementById('modalAdd').style.display = 'flex';
                 this.targetParent = id; 
-                state.editTargetId = null; 
+                this.state.editTargetId = null; 
                 this.addType = (type === 'add_folder') ? 'folder' : 'freq';
                 document.getElementById('addTitle').innerText = (this.addType === 'folder') ? "Create Folder" : "Add Channel";
                 document.getElementById('addName').value = "";
@@ -2198,14 +2220,14 @@ const htmlContent = `
                     document.getElementById('addFreqGroup').style.display = 'none';
                 } else {
                     document.getElementById('addFreqGroup').style.display = 'block';
-                    document.getElementById('addFreq').value = (state.freq/1e6).toFixed(3);
-                    this.selAddMod(state.mode);
+                    document.getElementById('addFreq').value = (this.state.freq/1e6).toFixed(3);
+                    this.selAddMod(this.state.mode);
                 }
                 document.getElementById('addName').focus();
             } else if (type === 'edit') {
-                const target = state.bm.find(b => b.id === id);
+                const target = this.state.bm.find(b => b.id === id);
                 if (!target) return;
-                state.editTargetId = id;
+                this.state.editTargetId = id;
                 document.getElementById('modalAdd').style.display = 'flex';
                 this.addType = target.isFolder ? 'folder' : 'freq';
                 document.getElementById('addTitle').innerText = target.isFolder ? "Edit Folder" : "Edit Channel";
@@ -2218,7 +2240,7 @@ const htmlContent = `
                       this.selAddMod(target.mode);
                 }
             } else if (type === 'move') {
-                state.moveTargetId = id;
+                this.state.moveTargetId = id;
                 document.getElementById('modalMove').style.display = 'flex';
                 const list = document.getElementById('moveFolderList');
                 list.innerHTML = this.genFolderListHtml(null, 0);
@@ -2230,14 +2252,14 @@ const htmlContent = `
                 html += '<div class="move-item" onclick="window.ws.changeParent(null)"><span class="material-symbols-outlined" style="margin-right:8px">home</span> ROOT</div>';
             }
             
-            const children = state.bm.filter(b => {
+            const children = this.state.bm.filter(b => {
                 if (!b.isFolder) return false;
                 if (parentId === null) return !b.parentId || b.parentId === "null"; 
                 return b.parentId === parentId;
             });
             
             children.forEach(c => {
-                if (c.id === state.moveTargetId) return; 
+                if (c.id === this.state.moveTargetId) return; 
 
                 const pad = depth * 20;
                 html += '<div class="move-item" style="padding-left:'+(12+pad)+'px" onclick="window.ws.changeParent(\''+c.id+'\')"><span class="material-symbols-outlined" style="margin-right:8px">folder</span> '+c.title+'</div>';
@@ -2266,14 +2288,14 @@ const htmlContent = `
             document.getElementById('addModWFM').className = 'btn '+(m==='WFM'?'active':'');
         },
         renderBM(list) {
-            const d = list || state.bm;
+            const d = list || this.state.bm;
             const roots = []; const map = {};
             d.forEach(i => map[i.id] = {...i, c:[]});
             d.forEach(i => { if(i.parentId && map[i.parentId]) map[i.parentId].c.push(map[i.id]); else roots.push(map[i.id]); });
             document.getElementById('listBM').innerHTML = this.tree(roots);
         },
         tree(nodes) {
-            const isEdit = state.editMode;
+            const isEdit = this.state.editMode;
             
             return nodes.map((n, idx) => {
                 const isFirst = idx === 0;
@@ -2311,7 +2333,7 @@ const htmlContent = `
                 }
 
                 if(n.isFolder) {
-                    const open = state.expanded.has(n.id);
+                    const open = this.state.expanded.has(n.id);
                     return '<div>' +
                             '<div class="row" onclick="'+onClick+'">' +
                                 '<div class="row-click-area">' +
@@ -2335,25 +2357,25 @@ const htmlContent = `
             }).join('');
         },
         tog(id) {
-            if(state.expanded.has(id)) state.expanded.delete(id); else state.expanded.add(id);
+            if(this.state.expanded.has(id)) this.state.expanded.delete(id); else this.state.expanded.add(id);
             this.renderBM();
         },
         togDate(date) {
             const id = 'date_' + date;
-            if(state.expanded.has(id)) state.expanded.delete(id); else state.expanded.add(id);
-            if (state.recData) this.renderRec(state.recData);
+            if(this.state.expanded.has(id)) this.state.expanded.delete(id); else this.state.expanded.add(id);
+            if (this.state.recData) this.renderRec(this.state.recData);
         },
         togFreq(date, freq) {
             const id = 'freq_' + date + '_' + freq;
-            if(state.expanded.has(id)) state.expanded.delete(id); else state.expanded.add(id);
-            if (state.recData) this.renderRec(state.recData);
+            if(this.state.expanded.has(id)) this.state.expanded.delete(id); else this.state.expanded.add(id);
+            if (this.state.recData) this.renderRec(this.state.recData);
         },
         renderRec(list) {
-            state.recData = list; // Store for re-rendering
+            this.state.recData = list; // Store for re-rendering
             let html = '';
             list.forEach(dateGroup => {
                 const dateId = 'date_' + dateGroup.date;
-                const isDateOpen = state.expanded.has(dateId);
+                const isDateOpen = this.state.expanded.has(dateId);
                 
                 html += '<div class="row" onclick="window.ui.togDate(\'' + dateGroup.date + '\')" style="background:rgba(255,255,255,0.08); margin-top:5px;">' +
                         '<div class="row-click-area">' +
@@ -2364,7 +2386,7 @@ const htmlContent = `
                 if (isDateOpen) {
                     dateGroup.freqs.forEach(freqGroup => {
                           const freqId = 'freq_' + dateGroup.date + '_' + freqGroup.freq;
-                          const isFreqOpen = state.expanded.has(freqId);
+                          const isFreqOpen = this.state.expanded.has(freqId);
 
                           html += '<div style="margin-left:15px; border-left:2px solid rgba(255,255,255,0.1); padding-left:10px;">' +
                                   '<div onclick="window.ui.togFreq(\'' + dateGroup.date + '\', \'' + freqGroup.freq + '\')" style="padding:8px 0; font-size:0.9rem; color:var(--acc); font-weight:bold; cursor:pointer; display:flex; align-items:center;">' + 
