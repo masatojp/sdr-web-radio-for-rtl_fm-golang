@@ -1770,7 +1770,7 @@ const htmlContent = `
         send(o) { if(this.c&&this.c.readyState===1) this.c.send(JSON.stringify(o)); },
         sendSq(v) { this.send({type:'set_squelch', val:parseInt(v)}); },
         setMode(m) { state.mode=m; this.tune(true); },
-        setAtt(a) { this.send({type:'set_att', att:a}); },
+        setAtt(a) { window.ui.stopAudioPipeline(); this.send({type:'set_att', att:a}); },
         togRec() { this.send({type:state.rec?'stop_recording':'start_recording'}); },
         move(id, dir) { this.send({type:'move_bookmark', id, dir}); },
         changeParent(pid) {
