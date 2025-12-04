@@ -1858,7 +1858,7 @@ const htmlContent = `
             if (nowTime - this.lastSpeedUpdate >= 1000) {
                 const mbps = (this.bytesReceived * 8 / 1000000).toFixed(2);
                 const btn = document.querySelector('.debug-badge');
-                if(btn) btn.innerHTML = `<span class="material-symbols-outlined" style="font-size: 0.9rem;">bug_report</span><span style="font-size:0.6rem; line-height:1;">${mbps}<br>Mbps</span>`;
+                if(btn) btn.innerHTML = '<span class="material-symbols-outlined" style="font-size: 0.9rem;">bug_report</span><span style="font-size:0.6rem; line-height:1;">' + mbps + '<br>Mbps</span>';
                 this.bytesReceived = 0;
                 this.lastSpeedUpdate = nowTime;
             }
