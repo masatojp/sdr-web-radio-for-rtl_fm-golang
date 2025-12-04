@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -60,6 +61,16 @@ type ServerState struct {
 	mu          sync.Mutex
 }
 
+type SystemStats struct {
+	CPUTemp   float64 `json:"cpuTemp"`
+	CPUUsage  float64 `json:"cpuUsage"`
+	MemTotal  uint64  `json:"memTotal"`
+	MemUsed   uint64  `json:"memUsed"`
+	DiskTotal uint64  `json:"diskTotal"`
+	DiskUsed  uint64  `json:"diskUsed"`
+	Uptime    uint64  `json:"uptime"`
+}
+
 type Bookmark struct {
 	ID       string  `json:"id"`
 	Title    string  `json:"title"`
@@ -70,19 +81,20 @@ type Bookmark struct {
 }
 
 type WSCommand struct {
-	Type        string          `json:"type"`
-	Password    string          `json:"password,omitempty"`
-	GPSPassword string          `json:"gpsPassword,omitempty"` // GPSロック解除用
-	Freq        float64         `json:"freq,omitempty"`
-	Mode        string          `json:"mode,omitempty"`
-	Title       string          `json:"title,omitempty"`
-	Att         string          `json:"att,omitempty"`
-	Val         int             `json:"val,omitempty"`
-	Filename    string          `json:"filename,omitempty"`
-	Data        json.RawMessage `json:"data,omitempty"`
-	ID          string          `json:"id,omitempty"`
-	Dir         string          `json:"dir,omitempty"`
-	NewParentID string          `json:"newParentId,omitempty"`
+	Type          string          `json:"type"`
+	Password      string          `json:"password,omitempty"`
+	GPSPassword   string          `json:"gpsPassword,omitempty"`   // GPSロック解除用
+	DebugPassword string          `json:"debugPassword,omitempty"` // デバッグモード解除用
+	Freq          float64         `json:"freq,omitempty"`
+	Mode          string          `json:"mode,omitempty"`
+	Title         string          `json:"title,omitempty"`
+	Att           string          `json:"att,omitempty"`
+	Val           int             `json:"val,omitempty"`
+	Filename      string          `json:"filename,omitempty"`
+	Data          json.RawMessage `json:"data,omitempty"`
+	ID            string          `json:"id,omitempty"`
+	Dir           string          `json:"dir,omitempty"`
+	NewParentID   string          `json:"newParentId,omitempty"`
 }
 
 // Nominatim Response
@@ -216,8 +228,9 @@ func (d *AudioDSP) Process(input []byte, threshold int) ProcessResult {
 
 // SafeClient wraps websocket connection with a mutex to prevent concurrent writes
 type SafeClient struct {
-	Conn *websocket.Conn
-	mu   sync.Mutex
+	Conn      *websocket.Conn
+	mu        sync.Mutex
+	DebugAuth bool // デバッグ情報閲覧権限
 }
 
 func (c *SafeClient) WriteMessage(messageType int, data []byte) error {
@@ -573,7 +586,94 @@ func sdrManager() {
 }
 
 // ==========================================
-// 7. Recording Logic
+// 7. System Stats (New)
+// ==========================================
+
+func getSystemStats() SystemStats {
+	var s SystemStats
+
+	// 1. CPU Temp
+	if temp, err := os.ReadFile("/sys/class/thermal/thermal_zone0/temp"); err == nil {
+		if t, err := strconv.ParseFloat(strings.TrimSpace(string(temp)), 64); err == nil {
+			s.CPUTemp = t / 1000.0
+		}
+	}
+
+	// 2. Memory Info
+	if mem, err := os.ReadFile("/proc/meminfo"); err == nil {
+		lines := strings.Split(string(mem), "\n")
+		var total, free, buffers, cached uint64
+		for _, line := range lines {
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
+			val, _ := strconv.ParseUint(fields[1], 10, 64)
+			switch strings.TrimSuffix(fields[0], ":") {
+			case "MemTotal":
+				total = val * 1024
+			case "MemFree":
+				free = val * 1024
+			case "Buffers":
+				buffers = val * 1024
+			case "Cached":
+				cached = val * 1024
+			}
+		}
+		s.MemTotal = total
+		s.MemUsed = total - (free + buffers + cached)
+	}
+
+	// 3. Disk Usage
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(RecordingsPath, &stat); err == nil {
+		s.DiskTotal = stat.Blocks * uint64(stat.Bsize)
+		s.DiskUsed = (stat.Blocks - stat.Bfree) * uint64(stat.Bsize)
+	}
+
+	// 4. Uptime
+	if uptime, err := os.ReadFile("/proc/uptime"); err == nil {
+		parts := strings.Fields(string(uptime))
+		if len(parts) > 0 {
+			if u, err := strconv.ParseFloat(parts[0], 64); err == nil {
+				s.Uptime = uint64(u)
+			}
+		}
+	}
+	
+	// 5. CPU Usage (Simple Calculation based on previous read would be better, but for simplicity just read loadavg)
+	if loadavg, err := os.ReadFile("/proc/loadavg"); err == nil {
+		fields := strings.Fields(string(loadavg))
+		if len(fields) > 0 {
+			s.CPUUsage, _ = strconv.ParseFloat(fields[0], 64) // 1min Load Avg
+		}
+	}
+
+	return s
+}
+
+func debugMonitor() {
+	ticker := time.NewTicker(1 * time.Second)
+	for range ticker.C {
+		stats := getSystemStats()
+		msg := map[string]interface{}{
+			"type": "debug_info",
+			"data": stats,
+		}
+		jsonBytes, _ := json.Marshal(msg)
+
+		clientsMu.Lock()
+		for client := range clients {
+			if client.DebugAuth {
+				client.WriteMessage(websocket.TextMessage, jsonBytes)
+			}
+		}
+		clientsMu.Unlock()
+	}
+}
+
+// ==========================================
+// 8. Recording Logic
 // ==========================================
 
 func startRecording() {
@@ -677,7 +777,7 @@ func writeWavHeader(w io.Writer, rate uint32, dataLen uint32) {
 }
 
 // ==========================================
-// 8. Data Persistence
+// 9. Data Persistence
 // ==========================================
 
 func loadData() {
@@ -721,7 +821,7 @@ func saveSquelch() {
 }
 
 // ==========================================
-// 9. WebSocket Handlers
+// 10. WebSocket Handlers
 // ==========================================
 
 func isDescendant(checkID, potentialAncestorID string, all []Bookmark) bool {
@@ -832,8 +932,8 @@ func handleMessages() {
 	}
 }
 
-func checkGPSHash(inputPass string) bool {
-	targetHash := os.Getenv("GPS_AUTH_HASH")
+func checkAuthHash(envKey, inputPass string) bool {
+	targetHash := os.Getenv(envKey)
 	if targetHash == "" { return false }
 	
 	sum := sha256.Sum256([]byte(inputPass))
@@ -892,12 +992,20 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		
 		case "auth_gps":
-			// GPS Lock Logic
-			if checkGPSHash(cmd.GPSPassword) {
+			if checkAuthHash("GPS_AUTH_HASH", cmd.GPSPassword) {
 				state.mu.Lock()
 				state.GPSUnlocked = !state.GPSUnlocked // Toggle Lock/Unlock
 				state.mu.Unlock()
-				broadcastStatus() // Updates ALL clients
+				broadcastStatus() // Updates ALL clients (Global state)
+			}
+		
+		case "auth_debug":
+			if checkAuthHash("DEBUG_AUTH_HASH", cmd.DebugPassword) {
+				client.mu.Lock()
+				client.DebugAuth = true
+				client.mu.Unlock()
+				// Ack to client
+				client.WriteJSON(map[string]interface{}{"type": "debug_auth_success"})
 			}
 
 		case "set_att":
@@ -1017,7 +1125,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // ==========================================
-// 10. Main & HTML Content
+// 11. Main & HTML Content
 // ==========================================
 
 func main() {
@@ -1052,6 +1160,7 @@ func main() {
 
 	go sdrManager()
 	go gpsManager() // GPS
+	go debugMonitor() // System Stats
 	go handleMessages()
 
 	go func() {
@@ -1077,7 +1186,7 @@ const htmlContent = `
 <style>
     :root { --bg: #050507; --panel: rgba(30, 30, 35, 0.7); --acc: #00ffc8; --acc-dim: rgba(0,255,200,0.15); --txt: #fff; --sub: #8b9bb4; --mute: #4a4a4a; --open: #00e676; --stop: #ff3b30; --warn: #ffcc00; }
     body { background: var(--bg); color: var(--txt); font-family: 'Inter', sans-serif; margin: 0; display: flex; justify-content: center; min-height: 100vh; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
-    .app { width: 100%; max-width: 480px; padding: 20px 20px 100px; box-sizing: border-box; }
+    .app { width: 100%; max-width: 480px; padding: 20px 20px 100px; box-sizing: border-box; padding-bottom: 150px; }
     .panel { background: var(--panel); backdrop-filter: blur(12px); border-radius: 16px; border: 1px solid rgba(255,255,255,0.08); padding: 20px; margin-bottom: 16px; }
     .freq { font-family: 'JetBrains Mono', monospace; font-size: 3.2rem; text-align: center; font-weight: 700; line-height: 1; text-shadow: 0 0 20px var(--acc-dim); margin: 5px 0 0 0; }
     .channel-title { font-family: 'Inter', sans-serif; font-size: 1.2rem; text-align: center; color: var(--acc); font-weight: 600; min-height: 1.5em; text-shadow: 0 0 10px rgba(0,255,200,0.3); margin-top: 10px; }
@@ -1141,9 +1250,7 @@ const htmlContent = `
     
     /* Map Styles */
     #map { width: 100%; height: 200px; border-radius: 12px; margin-top: 12px; border: 1px solid rgba(255,255,255,0.1); background: #222; }
-    /* Monochrome & Dark Theme Map Filter */
     .leaflet-tile { filter: grayscale(100%) invert(100%) contrast(0.8); }
-    
     .leaflet-bar a { background-color: var(--panel) !important; color: var(--txt) !important; border-bottom: 1px solid rgba(255,255,255,0.2) !important; }
     .map-container { position: relative; width: 100%; height: 200px; margin-top: 12px; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1); display: none; }
     #map { width: 100%; height: 100%; margin: 0; border: none; }
@@ -1154,11 +1261,19 @@ const htmlContent = `
         backdrop-filter: blur(2px); font-weight: bold; flex-direction: column; gap:10px;
     }
     .btn-unlock { background: var(--acc); color:#000; font-weight:bold; padding:8px 16px; border-radius:8px; border:none; cursor:pointer; }
+
+    /* Debug Styles */
+    .debug-btn { position: absolute; top: 20px; right: 20px; background: rgba(255,255,255,0.05); border: none; color: var(--sub); padding: 8px; border-radius: 8px; cursor: pointer; }
+    .debug-panel { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(10,10,12,0.95); padding: 15px; border-top: 1px solid #333; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: #aaa; z-index: 2000; display: none; justify-content: space-around; }
+    .debug-item { text-align: center; }
+    .debug-val { font-size: 1.2rem; color: #fff; font-weight: bold; }
 </style>
 <!-- Leaflet JS -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 </head>
 <body>
+    <button class="debug-btn" onclick="window.ui.modal('auth_debug')"><span class="material-symbols-outlined">bug_report</span></button>
+
     <div class="app">
         <div class="panel">
             <div class="badges">
@@ -1229,6 +1344,26 @@ const htmlContent = `
         <div class="panel" id="listRec" style="padding:10px;"></div>
     </div>
 
+    <!-- Debug Panel -->
+    <div id="debugPanel" class="debug-panel">
+        <div class="debug-item">
+            <div class="debug-val" id="dbgTemp">--°C</div>
+            <div>CPU TEMP</div>
+        </div>
+        <div class="debug-item">
+            <div class="debug-val" id="dbgCpu">--%</div>
+            <div>LOAD</div>
+        </div>
+        <div class="debug-item">
+            <div class="debug-val" id="dbgMem">--%</div>
+            <div>MEM</div>
+        </div>
+        <div class="debug-item">
+            <div class="debug-val" id="dbgDisk">--%</div>
+            <div>DISK</div>
+        </div>
+    </div>
+
     <!-- Modals -->
     <div class="ovl" id="modalTune">
         <div class="card">
@@ -1255,6 +1390,18 @@ const htmlContent = `
             <div style="display:flex; gap:10px;">
                 <button class="btn" style="flex:1" onclick="window.ui.closeModal()">CANCEL</button>
                 <button id="btnGPSModalAction" class="btn" style="flex:1; background:var(--acc); color:#000;" onclick="window.ws.authGPS()">UNLOCK</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="ovl" id="modalDebugAuth">
+        <div class="card">
+            <div style="color:#fff; font-weight:700; font-size:1.2rem; margin-bottom:20px;">Debug Mode</div>
+            <p style="color:var(--sub); margin-bottom:20px">Enter password to view system stats.</p>
+            <input type="password" class="inp" id="inpDebugPass" placeholder="Debug Password">
+            <div style="display:flex; gap:10px;">
+                <button class="btn" style="flex:1" onclick="window.ui.closeModal()">CANCEL</button>
+                <button class="btn" style="flex:1; background:var(--acc); color:#000;" onclick="window.ws.authDebug()">AUTH</button>
             </div>
         </div>
     </div>
@@ -1300,7 +1447,6 @@ const htmlContent = `
     window.ws = {
         c: null,
         connect() {
-            // Use window.location to derive WS URL
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
             this.c = new WebSocket(proto + '//' + location.host + '/ws');
             this.c.binaryType = 'arraybuffer';
@@ -1310,6 +1456,11 @@ const htmlContent = `
                     if(m.type==='status_update') window.ui.upd(m);
                     else if(m.type==='bookmarks') { state.bm = m.data; window.ui.renderBM(); }
                     else if(m.type==='recordings') window.ui.renderRec(m.data);
+                    else if(m.type==='debug_info') window.ui.updDebug(m.data);
+                    else if(m.type==='debug_auth_success') {
+                         window.ui.closeModal();
+                         document.getElementById('debugPanel').style.display = 'flex';
+                    }
                     else if(m.type==='error') alert(m.msg);
                 } else this.audio(e.data);
             };
@@ -1352,6 +1503,10 @@ const htmlContent = `
             const p = document.getElementById('inpGPSPass').value;
             this.send({type:'auth_gps', gpsPassword:p});
             window.ui.closeModal();
+        },
+        authDebug() {
+            const p = document.getElementById('inpDebugPass').value;
+            this.send({type:'auth_debug', debugPassword:p});
         },
         saveBookmark() {
             const title = document.getElementById('addName').value;
@@ -1434,7 +1589,6 @@ const htmlContent = `
                 }).addTo(map);
                 marker = L.marker([35.6895, 139.6917]).addTo(map);
                 
-                // Fix map render issue when hidden initially
                 setTimeout(() => map.invalidateSize(), 100);
             }
 
@@ -1462,7 +1616,6 @@ const htmlContent = `
                 }).addTo(map);
                 marker = L.marker([35.6895, 139.6917]).addTo(map);
                 
-                // Fix map render issue when hidden initially
                 setTimeout(() => map.invalidateSize(), 100);
             }
         },
@@ -1541,7 +1694,7 @@ const htmlContent = `
 
             state.freq=m.freq; state.mode=m.mode; state.att=m.att; state.rec=m.isRecording; state.squelch=m.squelch;
             state.title=m.title;
-            state.gpsUnlocked = m.gpsUnlocked; // Save GPS state
+            state.gpsUnlocked = m.gpsUnlocked;
             
             this.els.freq.innerText = (m.freq/1e6).toFixed(3);
             document.getElementById('dspTitle').innerText = m.title || '';
@@ -1562,16 +1715,13 @@ const htmlContent = `
                 btnGPS.innerText = "LOCK MAP & GPS";
                 btnGPS.classList.add('active');
                 
-                // Check if map was hidden to fix Leaflet rendering issues
                 const wasHidden = mapContainer.style.display === 'none';
                 mapContainer.style.display = 'block';
                 addrDisp.innerText = m.address || '';
                 
-                // Initialize map once visible
                 if (!map) {
                     window.ui.initMap();
                 } else if (wasHidden) {
-                    // Force resize recalculation if it was hidden
                     setTimeout(() => map.invalidateSize(), 100);
                 }
 
@@ -1581,7 +1731,7 @@ const htmlContent = `
                     const latLng = [m.lat, m.lon];
                     if (marker) marker.setLatLng(latLng);
                     if (map) {
-                        map.setView(latLng, 13); // Always center map on GPS update
+                        map.setView(latLng, 13);
                     }
                 } else if (m.gpsStatus === 'searching') {
                     mapMsg.style.display = 'flex';
@@ -1591,7 +1741,6 @@ const htmlContent = `
                     mapMsg.innerText = '⚠️ GPSモジュール未接続';
                 }
             } else {
-                // Locked
                 btnGPS.innerText = "UNLOCK MAP & GPS";
                 btnGPS.classList.remove('active');
                 mapContainer.style.display = 'none';
@@ -1608,6 +1757,15 @@ const htmlContent = `
             if (prevFreq !== m.freq || prevRec !== m.isRecording) {
                 this.updateMediaMetadata();
             }
+        },
+
+        updDebug(d) {
+            document.getElementById('dbgTemp').innerText = d.cpuTemp.toFixed(1) + '°C';
+            document.getElementById('dbgCpu').innerText = (d.cpuUsage * 100).toFixed(1) + '%';
+            const memPct = (d.memUsed / d.memTotal) * 100;
+            document.getElementById('dbgMem').innerText = memPct.toFixed(1) + '%';
+            const diskPct = (d.diskUsed / d.diskTotal) * 100;
+            document.getElementById('dbgDisk').innerText = diskPct.toFixed(0) + '%';
         },
         
         renderSq(v) { this.els.sq.style.left = v + '%'; this.els.valSq.innerText = v; },
@@ -1650,6 +1808,9 @@ const htmlContent = `
                 
                 document.getElementById('modalGPSAuth').style.display = 'flex';
                 document.getElementById('inpGPSPass').focus();
+            } else if (type === 'auth_debug') {
+                document.getElementById('modalDebugAuth').style.display = 'flex';
+                document.getElementById('inpDebugPass').focus();
             } else if (type === 'add_folder' || type === 'add_freq') {
                 document.getElementById('modalAdd').style.display = 'flex';
                 this.targetParent = id; 
@@ -1713,6 +1874,7 @@ const htmlContent = `
             document.getElementById('modalAdd').style.display = 'none';
             document.getElementById('modalMove').style.display = 'none';
             document.getElementById('modalGPSAuth').style.display = 'none';
+            document.getElementById('modalDebugAuth').style.display = 'none';
         },
         selMod(m) {
             this.modalMode = m;
