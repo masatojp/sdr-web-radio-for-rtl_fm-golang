@@ -1627,8 +1627,7 @@ const htmlContent = `
     let map, marker;
     const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false, moveTargetId: null, gpsUnlocked: false, deleteTarget: null, audioRunning: false };
     let nextStartTime = 0; 
-    let keepAliveOsc = null;
-
+    
     // WebSocket Definition
     window.ws = {
         c: null,
@@ -1864,17 +1863,6 @@ const htmlContent = `
 
                 const audioEl = document.getElementById('audioBridge');
                 audioEl.srcObject = dest.stream;
-                
-                // Keep Alive Oscillator
-                const osc = audioCtx.createOscillator();
-                const g = audioCtx.createGain();
-                osc.connect(g); 
-                g.connect(dest); 
-                g.connect(audioCtx.destination);
-                osc.frequency.value = 10; 
-                g.gain.value = 0.001; // Nearly silent
-                osc.start();
-                keepAliveOsc = osc;
                 
                 // Force audio element play synchronously (best for iOS)
                 audioEl.play().then(() => {
