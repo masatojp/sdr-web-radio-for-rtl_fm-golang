@@ -711,12 +711,13 @@ func startRecording() {
 	// Folder: xxx.xxxMHz
 	freqStr := fmt.Sprintf("%.3fMHz", float64(state.Freq)/1e6)
 	
-	// File: hhmmss
-	timeStr := now.Format("150405")
+	// File Prefix: YYYY-MM-DD_hh-mm-ss
+	timeStr := now.Format("2006-01-02_15-04-05")
 
 	// ブックマーク名
 	var titlePart string
 	if state.Title != "" {
+		// ファイル名に使用できない文字を置換
 		safeTitle := state.Title
 		replacer := strings.NewReplacer("/", "-", "\\", "-", ":", "-", "*", "-", "?", "-", "\"", "-", "<", "-", ">", "-", "|", "-")
 		safeTitle = replacer.Replace(safeTitle)
@@ -737,8 +738,8 @@ func startRecording() {
 		return
 	}
 
-	// File Name: hhmmss_Title_GPS.wav
-	filename := fmt.Sprintf("%s%s%s.wav", timeStr, titlePart, gpsInfo)
+	// File Name: YYYY-MM-DD_hh-mm-ss_Freq_Title_GPS.wav
+	filename := fmt.Sprintf("%s_%s%s%s.wav", timeStr, freqStr, titlePart, gpsInfo)
 	path := filepath.Join(dirPath, filename)
 	
 	f, err := os.Create(path)
