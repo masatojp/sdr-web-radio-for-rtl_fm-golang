@@ -9,6 +9,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"io/fs"
 	"log"
@@ -33,6 +36,7 @@ import (
 // ==========================================
 const (
 	Port           = ":3000"
+	// Password removed. Use TUNE_AUTH_HASH in .env
 	InitialFreq    = 126450000
 	InitialMode    = "AM"
 	SampleRate     = 48000
@@ -1273,46 +1277,80 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // ==========================================
-// 11. Main & HTML Content
+// 11. Main & HTML Content (PWA Support)
 // ==========================================
 
-func manifestHandler(w http.ResponseWriter, r *http.Request) {
-    w.Header().Set("Content-Type", "application/json")
-    w.Write([]byte(`{
-        "name": "SDR Commander",
-        "short_name": "SDR Cmd",
-        "start_url": "/",
-        "display": "standalone",
-        "background_color": "#050507",
-        "theme_color": "#050507",
-        "icons": [
-            {
-                "src": "https://placehold.co/192x192/111/00ffc8?text=SDR",
-                "sizes": "192x192",
-                "type": "image/png"
-            },
-            {
-                "src": "https://placehold.co/512x512/111/00ffc8?text=SDR",
-                "sizes": "512x512",
-                "type": "image/png"
-            }
-        ]
-    }`))
-}
+// PWA Manifest Content
+const manifestContent = `{
+  "name": "SDR Commander",
+  "short_name": "SDR Cmd",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#050507",
+  "theme_color": "#050507",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}`
 
-func swHandler(w http.ResponseWriter, r *http.Request) {
-    w.Header().Set("Content-Type", "application/javascript")
-    w.Write([]byte(`
-        self.addEventListener('install', (e) => {
-            self.skipWaiting();
-        });
-        self.addEventListener('activate', (e) => {
-            e.waitUntil(self.clients.claim());
-        });
-        self.addEventListener('fetch', (e) => {
-            e.respondWith(fetch(e.request));
-        });
-    `))
+// PWA Service Worker Content
+const swContent = `
+const CACHE_NAME = 'sdr-commander-v1';
+const urlsToCache = [
+  '/',
+  'https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@700&display=swap',
+  'https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0',
+  'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
+  'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'
+];
+
+self.addEventListener('install', event => {
+  event.waitUntil(
+    caches.open(CACHE_NAME)
+      .then(cache => cache.addAll(urlsToCache))
+  );
+});
+
+self.addEventListener('fetch', event => {
+  // Do not cache WebSocket or API calls if we had them distinct from root
+  if (event.request.url.includes('/ws') || event.request.url.includes('/download/')) {
+    return;
+  }
+  
+  event.respondWith(
+    caches.match(event.request)
+      .then(response => {
+        if (response) {
+          return response;
+        }
+        return fetch(event.request);
+      })
+  );
+});
+`
+
+// Helper to generate a simple icon in memory
+func generateIcon(w http.ResponseWriter, size int) {
+	rect := image.Rect(0, 0, size, size)
+	img := image.NewRGBA(rect)
+	c := color.RGBA{0, 255, 200, 255} // Teal color
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			img.Set(x, y, c)
+		}
+	}
+	w.Header().Set("Content-Type", "image/png")
+	png.Encode(w, img)
 }
 
 func main() {
@@ -1324,6 +1362,22 @@ func main() {
 	}
 
 	loadData()
+
+	// PWA Handlers
+	http.HandleFunc("/manifest.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(manifestContent))
+	})
+	http.HandleFunc("/sw.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		w.Write([]byte(swContent))
+	})
+	http.HandleFunc("/icon-192.png", func(w http.ResponseWriter, r *http.Request) {
+		generateIcon(w, 192)
+	})
+	http.HandleFunc("/icon-512.png", func(w http.ResponseWriter, r *http.Request) {
+		generateIcon(w, 512)
+	})
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
@@ -1350,10 +1404,6 @@ func main() {
 		http.NotFound(w, r)
 	})
 
-    // PWA Handlers
-    http.HandleFunc("/manifest.json", manifestHandler)
-    http.HandleFunc("/sw.js", swHandler)
-
 	http.HandleFunc("/ws", wsHandler)
 
 	go sdrManager()
@@ -1376,15 +1426,15 @@ const htmlContent = `
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="theme-color" content="#050507">
 <title>SDR COMMANDER</title>
 <link rel="manifest" href="/manifest.json">
-<link rel="apple-touch-icon" href="https://placehold.co/192x192/111/00ffc8?text=SDR">
+<meta name="theme-color" content="#050507">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="/icon-192.png">
+
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@700&display=swap">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
-<!-- Leaflet CSS -->
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
 <style>
     :root { --bg: #050507; --panel: rgba(30, 30, 35, 0.7); --acc: #00ffc8; --acc-dim: rgba(0,255,200,0.15); --txt: #fff; --sub: #8b9bb4; --mute: #4a4a4a; --open: #00e676; --stop: #ff3b30; --warn: #ffcc00; }
@@ -1474,7 +1524,6 @@ const htmlContent = `
     .debug-item { text-align: center; margin: 5px; }
     .debug-val { font-size: 1.0rem; color: #fff; font-weight: bold; }
 </style>
-<!-- Leaflet JS -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 </head>
 <body>
@@ -1486,7 +1535,6 @@ const htmlContent = `
                 <span class="badge" id="bdgAtt" style="display:none">ATT</span>
                 <span class="badge badge-sql" id="bdgSql">MUTED</span>
                 <span class="badge" id="bdgConn">👤 0</span>
-                <!-- Debug Badge Button -->
                 <button class="badge debug-badge" onclick="window.ui.toggleDebug()" title="Debug Stats">
                     <span class="material-symbols-outlined" style="font-size: 0.9rem;">bug_report</span>
                 </button>
@@ -1511,7 +1559,6 @@ const htmlContent = `
                 </div>
             </div>
             
-            <!-- Map Container starts hidden -->
             <button id="btnGPSAuth" class="btn" style="margin-top:10px; width:100%" onclick="window.ui.modal('auth_gps')">UNLOCK MAP & GPS</button>
             
             <div class="map-container" id="mapContainer">
@@ -1520,7 +1567,6 @@ const htmlContent = `
             </div>
         </div>
 
-        <!-- Controls etc... -->
         <div class="ctrls">
             <button class="btn-audio-toggle" id="btnAudio" onclick="window.ui.togAudio()">
                 <span class="material-symbols-outlined">volume_up</span> START LISTENING
@@ -1553,7 +1599,6 @@ const htmlContent = `
         <div class="panel" id="listRec" style="padding:10px;"></div>
     </div>
 
-    <!-- Debug Panel -->
     <div id="debugPanel" class="debug-panel">
         <div class="debug-item">
             <div class="debug-val" id="dbgTemp">--°C</div>
@@ -1581,7 +1626,6 @@ const htmlContent = `
         </div>
     </div>
 
-    <!-- Modals -->
     <div class="ovl" id="modalTune">
         <div class="card">
             <div style="color:#fff; font-weight:700; font-size:1.2rem; margin-bottom:20px;">Set Frequency</div>
@@ -1664,16 +1708,24 @@ const htmlContent = `
         </div>
     </div>
 
-    <!-- Hidden Audio for Background Playback -->
     <audio id="audioBridge" autoplay playsinline loop style="display:none;"></audio>
 
 <script>
+    // Register Service Worker for PWA
+    if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+            navigator.serviceWorker.register('/sw.js').then(registration => {
+                console.log('SW registered: ', registration);
+            }).catch(registrationError => {
+                console.log('SW registration failed: ', registrationError);
+            });
+        });
+    }
+
     let audioCtx;
-    let wakeLock = null;
     let map, marker;
-    const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false, moveTargetId: null, gpsUnlocked: false, deleteTarget: null, audioRunning: false };
+    const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false, moveTargetId: null, gpsUnlocked: false, deleteTarget: null };
     let nextStartTime = 0; 
-    let keepAliveOsc = null;
 
     // WebSocket Definition
     window.ws = {
@@ -1692,7 +1744,7 @@ const htmlContent = `
                     else if(m.type==='debug_auth_success') {
                          window.ui.closeModal();
                          document.getElementById('debugPanel').style.display = 'flex';
-                    }
+                     }
                     else if(m.type==='error') alert(m.msg);
                 } else this.audio(e.data);
             };
@@ -1798,10 +1850,7 @@ const htmlContent = `
             buf.getChannelData(0).set(f);
 
             const now = audioCtx.currentTime;
-            // Jitter Buffer for iOS Background Throttling
-            if (nextStartTime < now) {
-                nextStartTime = now + 0.04; // 40ms buffer
-            }
+            if (nextStartTime < now) nextStartTime = now;
 
             const s = audioCtx.createBufferSource();
             s.buffer = buf;
@@ -1822,11 +1871,6 @@ const htmlContent = `
         addType: 'freq',
 
         init() {
-            // Register Service Worker
-            if ('serviceWorker' in navigator) {
-                navigator.serviceWorker.register('/sw.js');
-            }
-
             if (window.ws) { window.ws.connect(); } 
             
             // Map Init
@@ -1840,7 +1884,6 @@ const htmlContent = `
                 setTimeout(() => map.invalidateSize(), 100);
             }
 
-            // Media Session Logic
             if ('mediaSession' in navigator) {
                 const ms = navigator.mediaSession;
                 ms.setActionHandler('play', () => this.togAudio());
@@ -1855,18 +1898,6 @@ const htmlContent = `
                     window.ws.tuneDir(newFreq / 1e6, state.mode);
                 });
             }
-
-            // Resume Audio Context on visibility change
-            document.addEventListener('visibilitychange', () => {
-                if (document.visibilityState === 'visible') {
-                    if (state.audioRunning && audioCtx && audioCtx.state === 'suspended') {
-                        audioCtx.resume();
-                    }
-                    if (state.audioRunning) {
-                        this.requestWakeLock();
-                    }
-                }
-            });
         },
 
         initMap() {
@@ -1881,67 +1912,35 @@ const htmlContent = `
             }
         },
 
-        async requestWakeLock() {
-            if ('wakeLock' in navigator) {
-                try {
-                    wakeLock = await navigator.wakeLock.request('screen');
-                    wakeLock.addEventListener('release', () => {
-                        console.log('Wake Lock released');
-                    });
-                } catch (err) {
-                    console.error(err.name + ", " + err.message);
-                }
-            }
-        },
-
-        async togAudio() {
+        togAudio() {
             const btn = document.getElementById('btnAudio');
-            
             if (!audioCtx) {
-                // Initialize Audio Context on user gesture
                 const Ctx = window.AudioContext || window.webkitAudioContext;
-                audioCtx = new Ctx({ latencyHint: 'playback' }); 
+                audioCtx = new Ctx({ latencyHint: 'interactive' }); 
                 
                 const dest = audioCtx.createMediaStreamDestination();
-                window.audioDest = dest;
-
                 const audioEl = document.getElementById('audioBridge');
                 audioEl.srcObject = dest.stream;
                 
-                // Force audio element play synchronously (best for iOS)
-                audioEl.play().then(() => {
-                    console.log("Audio Element Started");
-                }).catch(e => console.warn("Audio Element Play Error:", e));
-
-                state.audioRunning = true;
+                audioEl.play().catch(e => console.warn(e));
+                window.audioDest = dest;
+                
                 this.updateBtnState('running');
                 this.updateMediaMetadata();
-                this.requestWakeLock();
                 return;
             }
 
             if (audioCtx.state === 'running') {
                 audioCtx.suspend().then(() => {
-                    state.audioRunning = false;
                     this.updateBtnState('suspended');
-                    const audioEl = document.getElementById('audioBridge');
-                    audioEl.pause();
-                    if(wakeLock) {
-                        wakeLock.release();
-                        wakeLock = null;
-                    }
+                    document.getElementById('audioBridge').pause();
                     if('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
                 });
             } else {
-                // Resume logic
-                const audioEl = document.getElementById('audioBridge');
-                audioEl.play().catch(()=>{});
-                
                 audioCtx.resume().then(() => {
-                    state.audioRunning = true;
                     this.updateBtnState('running');
+                    document.getElementById('audioBridge').play().catch(()=>{});
                     this.updateMediaMetadata();
-                    this.requestWakeLock();
                 });
             }
         },
@@ -1958,7 +1957,7 @@ const htmlContent = `
         },
         
         updateMediaMetadata() {
-            if (!('mediaSession' in navigator) || !audioCtx || state.audioRunning === false) return;
+            if (!('mediaSession' in navigator) || !audioCtx || audioCtx.state !== 'running') return;
             navigator.mediaSession.playbackState = 'playing';
             
             const titleStr = state.title ? state.title : (state.freq/1e6).toFixed(3) + ' MHz';
@@ -2288,31 +2287,31 @@ const htmlContent = `
                 
                 if (isDateOpen) {
                     dateGroup.freqs.forEach(freqGroup => {
-                         const freqId = 'freq_' + dateGroup.date + '_' + freqGroup.freq;
-                         const isFreqOpen = state.expanded.has(freqId);
+                          const freqId = 'freq_' + dateGroup.date + '_' + freqGroup.freq;
+                          const isFreqOpen = state.expanded.has(freqId);
 
-                         html += '<div style="margin-left:15px; border-left:2px solid rgba(255,255,255,0.1); padding-left:10px;">' +
-                                 '<div onclick="window.ui.togFreq(\'' + dateGroup.date + '\', \'' + freqGroup.freq + '\')" style="padding:8px 0; font-size:0.9rem; color:var(--acc); font-weight:bold; cursor:pointer; display:flex; align-items:center;">' + 
-                                 '<span class="material-symbols-outlined icon '+(isFreqOpen?'rot':'')+'" style="font-size:1rem; margin-right:5px;">chevron_right</span>' +
-                                 freqGroup.freq + '</div>';
-                         
-                         if (isFreqOpen) {
-                             freqGroup.files.forEach(f => {
-                                 html += '<div class="row" style="margin-bottom:2px;">' +
-                                            '<div class="row-click-area">' +
-                                                '<div class="txt">' +
-                                                    '<span style="font-weight:600; font-size:0.85rem; word-break:break-all;">'+f.name+'</span>' +
-                                                    '<span class="sub">'+(f.size/1024/1024).toFixed(2)+' MB</span>' +
-                                                '</div>' +
-                                            '</div>' +
-                                            '<div class="act">' +
-                                                '<a href="/download/'+f.path+'" class="ib" download><span class="material-symbols-outlined">download</span></a>' +
-                                                '<button class="ib ib-del" onclick="window.ws.delRec(\''+f.path+'\')"><span class="material-symbols-outlined">delete</span></button>' +
-                                            '</div>' +
-                                        '</div>';
+                          html += '<div style="margin-left:15px; border-left:2px solid rgba(255,255,255,0.1); padding-left:10px;">' +
+                                  '<div onclick="window.ui.togFreq(\'' + dateGroup.date + '\', \'' + freqGroup.freq + '\')" style="padding:8px 0; font-size:0.9rem; color:var(--acc); font-weight:bold; cursor:pointer; display:flex; align-items:center;">' + 
+                                  '<span class="material-symbols-outlined icon '+(isFreqOpen?'rot':'')+'" style="font-size:1rem; margin-right:5px;">chevron_right</span>' +
+                                  freqGroup.freq + '</div>';
+                          
+                          if (isFreqOpen) {
+                              freqGroup.files.forEach(f => {
+                                  html += '<div class="row" style="margin-bottom:2px;">' +
+                                              '<div class="row-click-area">' +
+                                                  '<div class="txt">' +
+                                                      '<span style="font-weight:600; font-size:0.85rem; word-break:break-all;">'+f.name+'</span>' +
+                                                      '<span class="sub">'+(f.size/1024/1024).toFixed(2)+' MB</span>' +
+                                                  '</div>' +
+                                              '</div>' +
+                                              '<div class="act">' +
+                                                  '<a href="/download/'+f.path+'" class="ib" download><span class="material-symbols-outlined">download</span></a>' +
+                                                  '<button class="ib ib-del" onclick="window.ws.delRec(\''+f.path+'\')"><span class="material-symbols-outlined">delete</span></button>' +
+                                              '</div>' +
+                                          '</div>';
                              });
-                         }
-                         html += '</div>';
+                          }
+                          html += '</div>';
                     });
                 }
             });
