@@ -1458,7 +1458,7 @@ const htmlContent = `
     .badge-sql { background: var(--mute); color: #ccc; }
     .badge-sql.open { background: var(--open); color: #000; box-shadow: 0 0 10px var(--open); font-weight: bold; }
     /* Debug button integrated into badges row */
-    .debug-badge { cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 4px 8px; }
+    .debug-badge { cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 4px 8px; height: auto; min-width: 40px; }
     .debug-badge:hover { background: rgba(255,255,255,0.1); }
     
     .meter-wrap { position: relative; height: 32px; margin-top: 15px; border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; overflow: hidden; background: #111; }
@@ -1741,6 +1741,8 @@ const htmlContent = `
     window.ws = {
         c: null,
         watchdog: null,
+        bytesReceived: 0,
+        lastSpeedUpdate: 0,
         connect() {
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
             this.c = new WebSocket(proto + '//' + location.host + '/ws');
@@ -1849,6 +1851,17 @@ const htmlContent = `
             if (this.watchdog) clearTimeout(this.watchdog);
             // Set new timer: if no data for 500ms, stop pipeline
             this.watchdog = setTimeout(() => window.ui.stopAudioPipeline(), 500);
+
+            // Speed Calculation
+            this.bytesReceived += b.byteLength;
+            const nowTime = Date.now();
+            if (nowTime - this.lastSpeedUpdate >= 1000) {
+                const mbps = (this.bytesReceived * 8 / 1000000).toFixed(2);
+                const btn = document.querySelector('.debug-badge');
+                if(btn) btn.innerHTML = `<span class="material-symbols-outlined" style="font-size: 0.9rem;">bug_report</span><span style="font-size:0.6rem; line-height:1;">${mbps}<br>Mbps</span>`;
+                this.bytesReceived = 0;
+                this.lastSpeedUpdate = nowTime;
+            }
 
             // Resume audio bridge if it was auto-paused
             if (state.autoPaused) {
