@@ -535,7 +535,7 @@ func sdrManager() {
 	var cmd *exec.Cmd
 	var stdout io.ReadCloser
 	dsp := NewAudioDSP()
-	chunkSize := 16384
+	chunkSize := 4096
 	buf := make([]byte, chunkSize)
 
 	for {
@@ -1744,7 +1744,6 @@ const htmlContent = `
     // WebSocket Definition
     window.ws = {
         c: null,
-        watchdog: null,
         bytesReceived: 0,
         lastSpeedUpdate: 0,
         connect() {
@@ -1850,11 +1849,6 @@ const htmlContent = `
         },
         audio(b) {
             if(!audioCtx || audioCtx.state !== 'running') return;
-
-            // Watchdog: Clear previous timer
-            if (this.watchdog) clearTimeout(this.watchdog);
-            // Set new timer: if no data for 3000ms, stop pipeline
-            this.watchdog = setTimeout(() => window.ui.stopAudioPipeline(), 3000);
 
             // Speed Calculation
             this.bytesReceived += b.byteLength;
