@@ -1770,7 +1770,7 @@ const htmlContent = `
         send(o) { if(this.c&&this.c.readyState===1) this.c.send(JSON.stringify(o)); },
         sendSq(v) { this.send({type:'set_squelch', val:parseInt(v)}); },
         setMode(m) { state.mode=m; this.tune(true); },
-        setAtt(a) { window.ui.stopAudioPipeline(); this.send({type:'set_att', att:a}); },
+        setAtt(a) { this.send({type:'set_att', att:a}); },
         togRec() { this.send({type:state.rec?'stop_recording':'start_recording'}); },
         move(id, dir) { this.send({type:'move_bookmark', id, dir}); },
         changeParent(pid) {
@@ -1780,7 +1780,6 @@ const htmlContent = `
             }
         },
         tune(skip=false) {
-            window.ui.stopAudioPipeline();
             let f = state.freq;
             const m = window.ui.modalMode; 
             if(!skip) { const v = parseFloat(document.getElementById('inpFreq').value); if(v) f = Math.floor(v*1e6); }
@@ -1789,7 +1788,6 @@ const htmlContent = `
             window.ui.closeModal();
         },
         tuneDir(f, m, t) {
-            window.ui.stopAudioPipeline();
             const p = document.getElementById('inpPass').value;
             if (!p) {
                 state.freq = Math.floor(f*1e6);
@@ -1851,13 +1849,6 @@ const htmlContent = `
         audio(b) {
             if(!audioCtx || audioCtx.state !== 'running') return;
 
-            // Resume audio bridge if it was paused for tuning
-            if (state.audioPausedForTune) {
-                const el = document.getElementById('audioBridge');
-                if (el) el.play().catch(e=>{});
-                state.audioPausedForTune = false;
-                nextStartTime = 0; // Force reset
-            }
             const dv = new DataView(b);
             const rssi = dv.getInt16(0, true);
             const sqlOpen = dv.getInt16(2, true);
@@ -1974,17 +1965,6 @@ const htmlContent = `
                     document.getElementById('audioBridge').play().catch(()=>{});
                     this.updateMediaMetadata();
                 });
-            }
-        },
-
-        stopAudioPipeline() {
-            // Called when tuning to prevent looping of last buffer on iOS
-            if (audioCtx && audioCtx.state === 'running') {
-                const el = document.getElementById('audioBridge');
-                if (el) {
-                    el.pause();
-                    state.audioPausedForTune = true;
-                }
             }
         },
 
