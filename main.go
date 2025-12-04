@@ -1868,9 +1868,9 @@ const htmlContent = `
             }
 
             // Resume audio bridge if it was auto-paused
+            // Resume audio bridge if it was auto-paused
             if (state.autoPaused) {
-                const el = document.getElementById('audioBridge');
-                if (el) el.play().catch(e=>{});
+                // No need to call play() as we never paused
                 state.autoPaused = false;
                 nextStartTime = 0; // Force reset
             }
@@ -1996,12 +1996,18 @@ const htmlContent = `
 
         stopAudioPipeline() {
             // Called when tuning or signal lost to prevent looping
+            // Instead of pausing (which kills background playback on Android), we feed silence
             if (audioCtx && audioCtx.state === 'running') {
-                const el = document.getElementById('audioBridge');
-                if (el) {
-                    el.pause();
-                    state.autoPaused = true;
-                }
+                state.autoPaused = true;
+                // Create 0.5s silent buffer
+                const buf = audioCtx.createBuffer(1, 24000 * 0.5, 24000);
+                const s = audioCtx.createBufferSource();
+                s.buffer = buf;
+                if (window.audioDest) s.connect(window.audioDest);
+                else s.connect(audioCtx.destination);
+                s.start();
+                // Reset nextStartTime so when real audio comes back, it starts fresh
+                nextStartTime = 0;
             }
         },
 
