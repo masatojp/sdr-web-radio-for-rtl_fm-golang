@@ -1460,8 +1460,8 @@ const htmlContent = `
     .freq { font-family: 'JetBrains Mono', monospace; font-size: 3.2rem; text-align: center; font-weight: 700; line-height: 1; text-shadow: 0 0 20px var(--acc-dim); margin: 5px 0 0 0; }
     .channel-title { font-family: 'Inter', sans-serif; font-size: 1.2rem; text-align: center; color: var(--acc); font-weight: 600; min-height: 1.5em; text-shadow: 0 0 10px rgba(0,255,200,0.3); margin-top: 10px; }
     .address-display { font-size: 0.8rem; text-align: center; color: var(--sub); margin-bottom: 5px; min-height: 1em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .badges { display: flex; justify-content: center; gap: 8px; }
-    .badge { font-size: 0.75rem; padding: 4px 10px; border-radius: 20px; background: rgba(255,255,255,0.05); color: var(--sub); border: 1px solid rgba(255,255,255,0.05); transition: 0.2s; }
+    .badges { display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; }
+    .badge { font-size: 0.75rem; padding: 4px 10px; border-radius: 20px; background: rgba(255,255,255,0.05); color: var(--sub); border: 1px solid rgba(255,255,255,0.05); transition: 0.2s; white-space: nowrap; }
     .badge-sql { background: var(--mute); color: #ccc; }
     .badge-sql.open { background: var(--open); color: #000; box-shadow: 0 0 10px var(--open); font-weight: bold; }
     /* Debug button integrated into badges row */
