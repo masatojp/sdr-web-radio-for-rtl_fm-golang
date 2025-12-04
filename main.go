@@ -84,20 +84,21 @@ type Bookmark struct {
 }
 
 type WSCommand struct {
-	Type          string          `json:"type"`
-	Password      string          `json:"password,omitempty"`
-	GPSPassword   string          `json:"gpsPassword,omitempty"`   // GPSロック解除用
-	DebugPassword string          `json:"debugPassword,omitempty"` // デバッグモード解除用
-	Freq          float64         `json:"freq,omitempty"`
-	Mode          string          `json:"mode,omitempty"`
-	Title         string          `json:"title,omitempty"`
-	Att           string          `json:"att,omitempty"`
-	Val           int             `json:"val,omitempty"`
-	Filename      string          `json:"filename,omitempty"` // 削除時はパスとして使用
-	Data          json.RawMessage `json:"data,omitempty"`
-	ID            string          `json:"id,omitempty"`
-	Dir           string          `json:"dir,omitempty"`
-	NewParentID   string          `json:"newParentId,omitempty"`
+	Type           string          `json:"type"`
+	Password       string          `json:"password,omitempty"`
+	GPSPassword    string          `json:"gpsPassword,omitempty"`    // GPSロック解除用
+	DebugPassword  string          `json:"debugPassword,omitempty"`  // デバッグモード解除用
+	DeletePassword string          `json:"deletePassword,omitempty"` // 録音削除用
+	Freq           float64         `json:"freq,omitempty"`
+	Mode           string          `json:"mode,omitempty"`
+	Title          string          `json:"title,omitempty"`
+	Att            string          `json:"att,omitempty"`
+	Val            int             `json:"val,omitempty"`
+	Filename       string          `json:"filename,omitempty"` // 削除時はパスとして使用
+	Data           json.RawMessage `json:"data,omitempty"`
+	ID             string          `json:"id,omitempty"`
+	Dir            string          `json:"dir,omitempty"`
+	NewParentID    string          `json:"newParentId,omitempty"`
 }
 
 // Recording Structures for Nested Display
@@ -1098,6 +1099,10 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		case "stop_recording":
 			stopRecording()
 		case "delete_recording":
+            if !checkAuthHash("DELETE_AUTH_HASH", cmd.DeletePassword) {
+                client.WriteJSON(map[string]interface{}{"type": "error", "msg": "Invalid delete password"})
+                break
+            }
 			// Filename is now a relative path
 			// Prevent traversal
 			if !strings.Contains(cmd.Filename, "..") {
@@ -1347,7 +1352,7 @@ const htmlContent = `
     .btn-unlock { background: var(--acc); color:#000; font-weight:bold; padding:8px 16px; border-radius:8px; border:none; cursor:pointer; }
 
     /* Debug Styles */
-    .debug-btn { position: absolute; top: 10px; right: 10px; background: rgba(255,255,255,0.1); border: none; color: var(--sub); padding: 6px; border-radius: 6px; cursor: pointer; z-index: 900; }
+    .debug-btn { position: absolute; top: 15px; right: 15px; background: rgba(255,255,255,0.05); border: none; color: var(--sub); padding: 8px; border-radius: 8px; cursor: pointer; z-index: 900; }
     .debug-panel { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(10,10,12,0.95); padding: 15px; border-top: 1px solid #333; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: #aaa; z-index: 2000; display: none; justify-content: space-around; flex-wrap: wrap; }
     .debug-item { text-align: center; margin: 5px; }
     .debug-val { font-size: 1.0rem; color: #fff; font-weight: bold; }
@@ -1497,6 +1502,18 @@ const htmlContent = `
             </div>
         </div>
     </div>
+    
+    <div class="ovl" id="modalDeleteAuth">
+        <div class="card">
+            <div style="color:#ff3b30; font-weight:700; font-size:1.2rem; margin-bottom:20px;">Delete Recording</div>
+            <p style="color:var(--sub); margin-bottom:20px">Enter password to delete this file.</p>
+            <input type="password" class="inp" id="inpDeletePass" placeholder="Delete Password">
+            <div style="display:flex; gap:10px;">
+                <button class="btn" style="flex:1" onclick="window.ui.closeModal()">CANCEL</button>
+                <button class="btn" style="flex:1; background:var(--stop); color:#fff;" onclick="window.ws.execDel()">DELETE</button>
+            </div>
+        </div>
+    </div>
 
     <div class="ovl" id="modalAdd">
         <div class="card">
@@ -1532,7 +1549,7 @@ const htmlContent = `
 <script>
     let audioCtx;
     let map, marker;
-    const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false, moveTargetId: null, gpsUnlocked: false };
+    const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false, moveTargetId: null, gpsUnlocked: false, deleteTarget: null };
     let nextStartTime = 0; 
 
     // WebSocket Definition
@@ -1626,9 +1643,17 @@ const htmlContent = `
             }
             window.ui.closeModal();
         },
-        del(id) { if(confirm('Delete?')) this.send({type:'delete_bookmark', id}); },
-        delRec(n) { if(confirm('Delete?')) this.send({type:'delete_recording', filename:n}); },
-        
+        delRec(path) {
+            state.deleteTarget = path;
+            window.ui.modal('auth_delete');
+        },
+        execDel() {
+            const p = document.getElementById('inpDeletePass').value;
+            if(!state.deleteTarget) return;
+            this.send({type:'delete_recording', filename:state.deleteTarget, deletePassword:p});
+            window.ui.closeModal();
+            document.getElementById('inpDeletePass').value = ''; // clear
+        },
         audio(b) {
             if(!audioCtx || audioCtx.state !== 'running') return;
             const dv = new DataView(b);
@@ -1914,6 +1939,9 @@ const htmlContent = `
             } else if (type === 'auth_debug') {
                 document.getElementById('modalDebugAuth').style.display = 'flex';
                 document.getElementById('inpDebugPass').focus();
+            } else if (type === 'auth_delete') {
+                document.getElementById('modalDeleteAuth').style.display = 'flex';
+                document.getElementById('inpDeletePass').focus();
             } else if (type === 'add_folder' || type === 'add_freq') {
                 document.getElementById('modalAdd').style.display = 'flex';
                 this.targetParent = id; 
@@ -1978,6 +2006,7 @@ const htmlContent = `
             document.getElementById('modalMove').style.display = 'none';
             document.getElementById('modalGPSAuth').style.display = 'none';
             document.getElementById('modalDebugAuth').style.display = 'none';
+            document.getElementById('modalDeleteAuth').style.display = 'none';
         },
         selMod(m) {
             this.modalMode = m;
