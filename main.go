@@ -33,7 +33,7 @@ import (
 // ==========================================
 const (
 	Port           = ":3000"
-	Password       = "admin"
+	// Password removed. Use TUNE_AUTH_HASH in .env
 	InitialFreq    = 126450000
 	InitialMode    = "AM"
 	SampleRate     = 48000
@@ -759,6 +759,7 @@ func startRecording() {
 	state.RecFilename = path // Store full path for stopping later
 	
 	state.mu.Unlock()
+	
 	broadcastStatus()
 }
 
@@ -1050,7 +1051,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		
 		switch cmd.Type {
 		case "auth_tune":
-			if cmd.Password == Password {
+			if checkAuthHash("TUNE_AUTH_HASH", cmd.Password) {
 				state.mu.Lock()
 				state.Freq = int(cmd.Freq)
 				state.Mode = cmd.Mode
