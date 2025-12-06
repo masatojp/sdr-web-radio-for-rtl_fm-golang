@@ -2164,6 +2164,18 @@ const htmlContent = `
             const prevFreq = state.freq;
             const prevRec = state.rec;
 
+            // Reset buffer if frequency changed
+            if (prevFreq !== 0 && prevFreq !== m.freq) {
+                console.log("Freq changed, resetting buffer...");
+                audioQueue = [];
+                bufferedDuration = 0;
+                isBuffering = true;
+                nextStartTime = 0;
+                if (audioCtx) nextStartTime = audioCtx.currentTime;
+                document.getElementById('bufferingOverlay').style.display = 'flex';
+                document.getElementById('bufProgress').innerText = '0%';
+            }
+
             state.freq=m.freq; state.mode=m.mode; state.att=m.att; state.rec=m.isRecording; state.squelch=m.squelch;
             state.title=m.title;
             state.gpsUnlocked = m.gpsUnlocked;
