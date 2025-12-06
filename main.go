@@ -1691,6 +1691,11 @@ const htmlContent = `
             <div>LATENCY</div>
         </div>
     </div>
+    
+    <div id="bufferingOverlay" style="display:none; position:fixed; top:50%; left:50%; transform:translate(-50%, -50%); background:rgba(0,0,0,0.8); padding:20px 40px; border-radius:12px; border:1px solid var(--acc); z-index:9999; flex-direction:column; align-items:center; gap:10px;">
+        <div style="color:var(--acc); font-weight:bold; font-size:1.2rem;">BUFFERING</div>
+        <div id="bufProgress" style="color:#fff;">0%</div>
+    </div>
 
     <div class="ovl" id="modalTune">
         <div class="card">
@@ -1793,6 +1798,12 @@ const htmlContent = `
     let map, marker;
     const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false, moveTargetId: null, gpsUnlocked: false, deleteTarget: null };
     let nextStartTime = 0; 
+    
+    // Audio Queue Logic
+    let audioQueue = [];
+    let isBuffering = true;
+    const BUFFER_TARGET = 5.0; // 5 seconds target
+    let bufferedDuration = 0; 
 
     // WebSocket Definition
     window.ws = {
@@ -1964,24 +1975,66 @@ const htmlContent = `
             const buf = audioCtx.createBuffer(1, f.length, 24000); // Updated to 24kHz
             buf.getChannelData(0).set(f);
 
+            // Queue the buffer
+            audioQueue.push(buf);
+            bufferedDuration += buf.duration;
+            this.processQueue();
+        },
+        
+        processQueue() {
+            if (!audioCtx) return;
             const now = audioCtx.currentTime;
-            
-            // iOS Fix: If the next start time is in the past (underrun due to network delay or frequency switch),
-            // reset it to now to prevent the browser from trying to catch up (stutter/fast-forward/loop effect).
-            if (nextStartTime < now) {
-                // Adaptive Start: High stability buffer (3.0s) as requested
-                const preBuffer = (nextStartTime === 0) ? 3.0 : 3.0;
-                nextStartTime = now + preBuffer;
+            const el = document.getElementById('bufferingOverlay');
+            const prog = document.getElementById('bufProgress');
+
+            if (isBuffering) {
+                el.style.display = 'flex';
+                const pct = Math.min(100, Math.floor((bufferedDuration / BUFFER_TARGET) * 100));
+                prog.innerText = pct + '%';
+
+                if (bufferedDuration >= BUFFER_TARGET) {
+                    isBuffering = false;
+                    el.style.display = 'none';
+                    nextStartTime = now + 0.1; // Start immediately after buffering
+                } else {
+                    return; // Keep buffering
+                }
             }
 
-            const s = audioCtx.createBufferSource();
-            s.buffer = buf;
-            if (window.audioDest) s.connect(window.audioDest);
-            else s.connect(audioCtx.destination);
-            
-            s.start(nextStartTime);
-            nextStartTime += buf.duration;
-        }
+            // Playing State
+            if (nextStartTime < now) {
+                // Underrun detected!
+                console.log("Underrun! Re-buffering...");
+                isBuffering = true;
+                bufferedDuration = 0; // Reset count (conceptually, though we keep queue)
+                // Actually, we should keep what we have and just add to it.
+                // But for simplicity, let's just switch mode and wait for more data.
+                // Re-calculate buffered duration from queue?
+                // Ideally, we only count what's in the queue.
+                // Let's rely on audioQueue length.
+                bufferedDuration = audioQueue.reduce((acc, b) => acc + b.duration, 0);
+                return; 
+            }
+
+            while (audioQueue.length > 0) {
+                const b = audioQueue.shift();
+                
+                // If we are buffering, stop processing (shouldn't happen due to check above, but for safety)
+                if (isBuffering) {
+                    audioQueue.unshift(b);
+                    break;
+                }
+
+                const s = audioCtx.createBufferSource();
+                s.buffer = b;
+                if (window.audioDest) s.connect(window.audioDest);
+                else s.connect(audioCtx.destination);
+
+                s.start(nextStartTime);
+                nextStartTime += b.duration;
+                bufferedDuration -= b.duration; // Remove from buffer count as it's scheduled
+            }
+        },
     };
 
     // UI Definition
@@ -2080,6 +2133,11 @@ const htmlContent = `
                     audioCtx = null;
                     state.autoPaused = false;
                     nextStartTime = 0;
+                    // Reset Queue
+                    audioQueue = [];
+                    bufferedDuration = 0;
+                    isBuffering = true;
+                    document.getElementById('bufferingOverlay').style.display = 'none';
                 });
             }
         },
