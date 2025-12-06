@@ -1851,7 +1851,7 @@ const htmlContent = `
         },
         sendSq(v) { this.send({type:'set_squelch', val:parseInt(v)}); },
         setMode(m) { state.mode=m; this.tune(true); },
-        setAtt(a) { window.ui.stopAudioPipeline(); this.send({type:'set_att', att:a}); },
+        setAtt(a) { /* window.ui.stopAudioPipeline(); */ this.send({type:'set_att', att:a}); },
         togRec() { this.send({type:state.rec?'stop_recording':'start_recording'}); },
         move(id, dir) { this.send({type:'move_bookmark', id, dir}); },
         changeParent(pid) {
@@ -1861,7 +1861,7 @@ const htmlContent = `
             }
         },
         tune(skip=false) {
-            window.ui.stopAudioPipeline();
+            // window.ui.stopAudioPipeline(); // Removed to keep context alive
             let f = state.freq;
             const m = window.ui.modalMode; 
             if(!skip) { const v = parseFloat(document.getElementById('inpFreq').value); if(v) f = Math.floor(v*1e6); }
@@ -1870,7 +1870,7 @@ const htmlContent = `
             window.ui.closeModal();
         },
         tuneDir(f, m, t) {
-            window.ui.stopAudioPipeline();
+            // window.ui.stopAudioPipeline(); // Removed to keep context alive
             const p = document.getElementById('inpPass').value;
             if (!p) {
                 state.freq = Math.floor(f*1e6);
