@@ -301,7 +301,7 @@ var (
 	squelchDB = make(map[string]int)
 
 	clients   = make(map[*SafeClient]bool)
-	broadcast = make(chan []byte, 256) // バッファサイズを明示
+	broadcast = make(chan []byte, 1024) // バッファサイズを拡張
 	statusMsg = make(chan []byte)
 	clientsMu sync.Mutex
 
@@ -1051,6 +1051,7 @@ func handleMessages() {
 		case audio := <-broadcast:
 			clientsMu.Lock()
 			for client := range clients {
+				client.Conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
 				err := client.WriteMessage(websocket.BinaryMessage, audio)
 				if err != nil {
 					client.Close()
@@ -1905,7 +1906,7 @@ const htmlContent = `
             // iOS Fix: If the next start time is in the past (underrun due to network delay or frequency switch),
             // reset it to now to prevent the browser from trying to catch up (stutter/fast-forward/loop effect).
             if (nextStartTime < now) {
-                nextStartTime = now + 0.5; // Increase buffer for stability on mobile
+                nextStartTime = now + 0.1; // Reduced buffer for lower latency
             }
 
             const s = audioCtx.createBufferSource();
@@ -2009,11 +2010,12 @@ const htmlContent = `
         stopAudioPipeline() {
             // Called when tuning or signal lost to prevent looping
             // Use GainNode to mute instead of pausing or scheduling silence
-            if (audioCtx && audioCtx.state === 'running' && window.audioGain) {
-                state.autoPaused = true;
-                window.audioGain.gain.value = 0.0; // Mute
-                // Reset nextStartTime so when real audio comes back, it starts fresh
-                nextStartTime = 0;
+            if (audioCtx && audioCtx.state === 'running') {
+                audioCtx.close().then(() => {
+                    audioCtx = null;
+                    state.autoPaused = false;
+                    nextStartTime = 0;
+                });
             }
         },
 
