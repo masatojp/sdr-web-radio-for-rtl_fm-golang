@@ -39,7 +39,8 @@ const (
 	// Password removed. Use TUNE_AUTH_HASH in .env
 	InitialFreq    = 126450000
 	InitialMode    = "AM"
-	SampleRate     = 48000
+	SampleRate     = 24000 // Reduced to 24kHz for Mobile Optimization (Bandwidth Saving)
+	BufSize        = 4096
 	RecordingsPath = "./recordings"
 	BookmarksFile  = "./bookmarks.json"
 	SquelchFile    = "./squelch_data.json"
@@ -541,7 +542,7 @@ func sdrManager() {
 	
 	// Aggregation buffer
 	var aggBuf []byte
-	const aggTarget = 19200 // Target bytes per packet (approx 200ms of 16-bit PCM at 48k)
+	const aggTarget = 24000 // Target bytes per packet (approx 500ms of 16-bit PCM at 24k)
 
 	for {
 		// 重要：プロセス起動前に古いブロードキャストデータを破棄する
@@ -1960,7 +1961,7 @@ const htmlContent = `
             const s16 = new Int16Array(b, 4);
             for(let i=0; i<f.length; i++) f[i] = s16[i]/32768.0;
 
-            const buf = audioCtx.createBuffer(1, f.length, 48000);
+            const buf = audioCtx.createBuffer(1, f.length, 24000); // Updated to 24kHz
             buf.getChannelData(0).set(f);
 
             const now = audioCtx.currentTime;
