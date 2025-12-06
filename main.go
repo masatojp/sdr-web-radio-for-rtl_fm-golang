@@ -1929,8 +1929,8 @@ const htmlContent = `
             // iOS Fix: If the next start time is in the past (underrun due to network delay or frequency switch),
             // reset it to now to prevent the browser from trying to catch up (stutter/fast-forward/loop effect).
             if (nextStartTime < now) {
-                // Adaptive Start: High stability buffer (0.5s)
-                const preBuffer = (nextStartTime === 0) ? 0.5 : 0.5;
+                // Adaptive Start: High stability buffer (3.0s) as requested
+                const preBuffer = (nextStartTime === 0) ? 3.0 : 3.0;
                 nextStartTime = now + preBuffer;
             }
 
