@@ -541,7 +541,7 @@ func sdrManager() {
 	
 	// Aggregation buffer
 	var aggBuf []byte
-	const aggTarget = 9600 // Target bytes per packet (approx 100ms of 16-bit PCM at 48k)
+	const aggTarget = 19200 // Target bytes per packet (approx 200ms of 16-bit PCM at 48k)
 
 	for {
 		// 重要：プロセス起動前に古いブロードキャストデータを破棄する
@@ -1074,7 +1074,8 @@ func handleMessages() {
 		case audio := <-broadcast:
 			clientsMu.Lock()
 			for client := range clients {
-				client.Conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+				// Relaxed deadline: 2 seconds to prevent drops on network jitter
+				client.Conn.SetWriteDeadline(time.Now().Add(2000 * time.Millisecond))
 				err := client.WriteMessage(websocket.BinaryMessage, audio)
 				if err != nil {
 					client.Close()
