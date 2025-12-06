@@ -1403,6 +1403,21 @@ func main() {
 		log.Println("Note: .env file not found, continuing without env vars")
 	}
 
+	// Set default hashes if not present (Default password: "password")
+	defaultHash := "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"
+	if os.Getenv("DEBUG_AUTH_HASH") == "" {
+		os.Setenv("DEBUG_AUTH_HASH", defaultHash)
+	}
+	if os.Getenv("TUNE_AUTH_HASH") == "" {
+		os.Setenv("TUNE_AUTH_HASH", defaultHash)
+	}
+	if os.Getenv("GPS_AUTH_HASH") == "" {
+		os.Setenv("GPS_AUTH_HASH", defaultHash)
+	}
+	if os.Getenv("DELETE_AUTH_HASH") == "" {
+		os.Setenv("DELETE_AUTH_HASH", defaultHash)
+	}
+
 	loadData()
 
 	// PWA Handlers
