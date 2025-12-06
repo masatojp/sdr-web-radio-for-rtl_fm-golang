@@ -1780,7 +1780,8 @@ const htmlContent = `
     </div>
 
     <!-- Removed loop attribute to prevent iOS recycling buffer on stall -->
-    <!-- Removed audioBridge -->
+    <!-- Audio Bridge for iOS Silent Mode Support -->
+    <audio id="audioBridge" autoplay playsinline style="display:none;"></audio>
 
 <script>
     // Register Service Worker for PWA
@@ -2093,8 +2094,13 @@ const htmlContent = `
                 const Ctx = window.AudioContext || window.webkitAudioContext;
                 audioCtx = new Ctx({ latencyHint: 'playback' }); 
                 
-                // Direct connection to destination, no background hack
-                window.audioDest = audioCtx.destination;
+                // Restore audioBridge for iOS Silent Mode
+                const dest = audioCtx.createMediaStreamDestination();
+                const audioEl = document.getElementById('audioBridge');
+                audioEl.srcObject = dest.stream;
+                audioEl.play().catch(e => console.warn(e));
+                
+                window.audioDest = dest; // Connect sources to MediaStreamDestination
                 
                 this.updateBtnState('running');
                 this.updateMediaMetadata();
@@ -2104,11 +2110,13 @@ const htmlContent = `
             if (audioCtx.state === 'running') {
                 audioCtx.suspend().then(() => {
                     this.updateBtnState('suspended');
+                    document.getElementById('audioBridge').pause();
                     if('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
                 });
             } else {
                 audioCtx.resume().then(() => {
                     this.updateBtnState('running');
+                    document.getElementById('audioBridge').play().catch(()=>{});
                     this.updateMediaMetadata();
                 });
             }
