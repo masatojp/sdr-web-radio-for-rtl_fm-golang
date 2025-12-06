@@ -1997,7 +1997,11 @@ const htmlContent = `
                     isBuffering = false;
                     el.style.display = 'none';
                     nextStartTime = now + 0.1; // Start immediately after buffering
+                    // Resume audioBridge to enable playback
+                    document.getElementById('audioBridge').play().catch(()=>{});
                 } else {
+                    // Ensure audioBridge is paused while buffering to prevent looping
+                    document.getElementById('audioBridge').pause();
                     return; // Keep buffering
                 }
             }
@@ -2007,6 +2011,9 @@ const htmlContent = `
                 // Underrun detected!
                 console.log("Underrun! Re-buffering...");
                 isBuffering = true;
+                // Pause audioBridge immediately to stop looping
+                document.getElementById('audioBridge').pause();
+                
                 bufferedDuration = 0; // Reset count (conceptually, though we keep queue)
                 // Actually, we should keep what we have and just add to it.
                 // But for simplicity, let's just switch mode and wait for more data.
@@ -2182,6 +2189,8 @@ const htmlContent = `
                 if (audioCtx) nextStartTime = audioCtx.currentTime;
                 document.getElementById('bufferingOverlay').style.display = 'flex';
                 document.getElementById('bufProgress').innerText = '0%';
+                // Pause audioBridge on reset
+                document.getElementById('audioBridge').pause();
             }
 
             state.freq=m.freq; state.mode=m.mode; state.att=m.att; state.rec=m.isRecording; state.squelch=m.squelch;
