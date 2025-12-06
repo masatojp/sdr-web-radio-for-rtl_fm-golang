@@ -160,33 +160,6 @@ func NewAudioDSP() *AudioDSP {
 	return &AudioDSP{agcGain: 1.0}
 }
 
-// u-Law Lookup Table for fast encoding? No, just simple math.
-// LinearToUl converts 16-bit PCM to 8-bit u-Law
-func LinearToUl(pcm int16) uint8 {
-	const (
-		BIAS = 0x84
-		CLIP = 32635
-	)
-	sign := 0
-	if pcm < 0 {
-		pcm = -pcm
-		sign = 0x80
-	}
-	if pcm > CLIP {
-		pcm = CLIP
-	}
-	pcm += BIAS
-	exponent := 7
-	mask := int16(0x4000)
-	for (pcm & mask) == 0 && exponent > 0 {
-		exponent--
-		mask >>= 1
-	}
-	mantissa := (pcm >> (exponent + 3)) & 0x0F
-	ulaw := sign | (exponent << 4) | int(mantissa)
-	return uint8(^ulaw)
-}
-
 func (d *AudioDSP) Reset() {
 	d.lastIn = 0
 	d.lastOut = 0
@@ -255,8 +228,8 @@ func (d *AudioDSP) Process(input []byte, threshold int) ProcessResult {
 		}
 
 		outInt := int16(p * 32767)
-		// u-Law Encoding
-		d.outBuf[i] = LinearToUl(outInt)
+		// Optimized writing: avoid binary.Write
+		binary.LittleEndian.PutUint16(d.outBuf[i*2:i*2+2], uint16(outInt))
 
 		sumSq += s * s
 	}
@@ -567,7 +540,7 @@ func sdrManager() {
 	
 	// Aggregation buffer
 	var aggBuf []byte
-	const aggTarget = 4000 // Target bytes per packet (approx 80ms of u-Law at 48k)
+	const aggTarget = 9600 // Target bytes per packet (approx 100ms of 16-bit PCM at 48k)
 
 	for {
 		// 重要：プロセス起動前に古いブロードキャストデータを破棄する
@@ -1791,17 +1764,6 @@ const htmlContent = `
     let map, marker;
     const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false, moveTargetId: null, gpsUnlocked: false, deleteTarget: null };
     let nextStartTime = 0; 
-    
-    // u-Law Lookup Table
-    const ulawMap = new Float32Array(256);
-    for(let i=0; i<256; i++) {
-        let ulaw = ~i;
-        let sign = (ulaw & 0x80) ? -1 : 1;
-        let exponent = (ulaw >> 4) & 0x07;
-        let mantissa = ulaw & 0x0F;
-        let sample = sign * (0x21 | (mantissa << 1)) << (exponent + 2); // 16-bit linear
-        ulawMap[i] = sample / 32768.0;
-    } 
 
     // WebSocket Definition
     window.ws = {
@@ -1955,9 +1917,9 @@ const htmlContent = `
             if (sqlOpen) { bdgSql.innerText = 'SQL OPEN'; bdgSql.className = 'badge badge-sql open'; } 
             else { bdgSql.innerText = 'MUTED'; bdgSql.className = 'badge badge-sql'; }
 
-            const f = new Float32Array(b.byteLength - 4);
-            const u8 = new Uint8Array(b, 4);
-            for(let i=0; i<f.length; i++) f[i] = ulawMap[u8[i]];
+            const f = new Float32Array((b.byteLength - 4) / 2);
+            const s16 = new Int16Array(b, 4);
+            for(let i=0; i<f.length; i++) f[i] = s16[i]/32768.0;
 
             const buf = audioCtx.createBuffer(1, f.length, 48000);
             buf.getChannelData(0).set(f);
