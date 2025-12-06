@@ -98,6 +98,7 @@ type WSCommand struct {
 	Att            string          `json:"att,omitempty"`
 	Val            int             `json:"val,omitempty"`
 	Filename       string          `json:"filename,omitempty"` // 削除時はパスとして使用
+	Timestamp      int64           `json:"timestamp,omitempty"` // Latency measurement
 	Data           json.RawMessage `json:"data,omitempty"`
 	ID             string          `json:"id,omitempty"`
 	Dir            string          `json:"dir,omitempty"`
@@ -1185,6 +1186,13 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			squelchDB[fmt.Sprintf("%d", state.Freq)] = cmd.Val
 			saveSquelch()
 			broadcastStatus()
+
+		case "ping":
+			// Echo back pong with same timestamp
+			client.WriteJSON(map[string]interface{}{
+				"type":      "pong",
+				"timestamp": cmd.Timestamp,
+			})
 		case "start_recording":
 			startRecording()
 		case "stop_recording":
@@ -1661,6 +1669,10 @@ const htmlContent = `
             <div class="debug-val" id="dbgSpeed">-- Mbps</div>
             <div>NET SPEED</div>
         </div>
+        <div class="debug-item">
+            <div class="debug-val" id="dbgLatency">-- ms</div>
+            <div>LATENCY</div>
+        </div>
     </div>
 
     <div class="ovl" id="modalTune">
@@ -1787,9 +1799,20 @@ const htmlContent = `
                           document.getElementById('debugPanel').style.display = 'flex';
                       }
                     else if(m.type==='error') alert(m.msg);
+                    else if(m.type==='pong') {
+                        const latency = Date.now() - m.timestamp;
+                        const el = document.getElementById('dbgLatency');
+                        if(el) el.innerText = latency + ' ms';
+                    }
                 } else this.audio(e.data);
             };
             this.c.onclose = () => setTimeout(()=>this.connect(), 3000);
+            
+            // Start Ping Loop
+            if(this.pingInterval) clearInterval(this.pingInterval);
+            this.pingInterval = setInterval(() => {
+                this.send({type:'ping', timestamp: Date.now()});
+            }, 2000);
         },
         send(o) { 
             if(this.c&&this.c.readyState===1) {
