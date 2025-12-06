@@ -39,7 +39,7 @@ const (
 	// Password removed. Use TUNE_AUTH_HASH in .env
 	InitialFreq    = 126450000
 	InitialMode    = "AM"
-	SampleRate     = 24000
+	SampleRate     = 48000
 	RecordingsPath = "./recordings"
 	BookmarksFile  = "./bookmarks.json"
 	SquelchFile    = "./squelch_data.json"
@@ -578,7 +578,8 @@ func sdrManager() {
 			if mode == "FM" {
 				rtlMode = "fm"
 			}
-			args = append(args, "-M", rtlMode, "-s", fmt.Sprintf("%d", SampleRate))
+			// Explicit downsampling: Capture at 240k, Output at 48k
+			args = append(args, "-M", rtlMode, "-s", "240000", "-r", fmt.Sprintf("%d", SampleRate))
 		}
 
 		fmt.Printf("[Radio] Starting: rtl_fm %v\n", args)
@@ -1896,7 +1897,7 @@ const htmlContent = `
             const s16 = new Int16Array(b, 4);
             for(let i=0; i<f.length; i++) f[i] = s16[i]/32768.0;
 
-            const buf = audioCtx.createBuffer(1, f.length, 24000);
+            const buf = audioCtx.createBuffer(1, f.length, 48000);
             buf.getChannelData(0).set(f);
 
             const now = audioCtx.currentTime;
