@@ -1809,6 +1809,7 @@ const htmlContent = `
             }
             this.send({type:'auth_tune', password:p, freq:Math.floor(f*1e6), mode:m, title:t});
             state.mode = m;
+            if(t) document.getElementById('dspTitle').innerText = t; // Immediate UI update
         },
         authGPS() {
             const p = document.getElementById('inpGPSPass').value;
@@ -1906,7 +1907,9 @@ const htmlContent = `
             // iOS Fix: If the next start time is in the past (underrun due to network delay or frequency switch),
             // reset it to now to prevent the browser from trying to catch up (stutter/fast-forward/loop effect).
             if (nextStartTime < now) {
-                nextStartTime = now + 0.1; // Reduced buffer for lower latency
+                // Adaptive Start: If fresh start (0), pre-buffer slightly. If underrun, catch up but don't be too aggressive.
+                const preBuffer = (nextStartTime === 0) ? 0.2 : 0.3;
+                nextStartTime = now + preBuffer;
             }
 
             const s = audioCtx.createBufferSource();
